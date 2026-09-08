@@ -8,7 +8,12 @@ import { startWorkerLoop } from './jobs/loop.js';
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
-  const pool = createPool({ connectionString: config.DATABASE_URL, max: config.PGPOOL_MAX });
+  const pool = createPool({
+    connectionString: config.DATABASE_URL,
+    max: config.PGPOOL_MAX,
+    nodeEnv: config.NODE_ENV,
+    pgSsl: config.PG_SSL,
+  });
 
   await migrate(pool);
 

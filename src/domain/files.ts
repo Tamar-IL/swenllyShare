@@ -15,6 +15,57 @@ import type { SettingsService } from './settings.js';
 const REQUEST_TOKEN_BITS = 130;
 const PUBLIC_SLUG_BITS = 130;
 
+/** `type/subtype` per RFC 2045/6838's token grammar (`token = 1*<any CHAR except CTLs
+ * or tspecials>`), restricted further to the lowercase-only characters this function
+ * ever produces — params are stripped before this ever runs, so `;` doesn't need to be
+ * allowed here. */
+const MIME_RE = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
+const DEFAULT_MIME = 'application/octet-stream';
+
+/**
+ * Normalizes a client-supplied MIME type before it is ever stored (finding #4,
+ * docs/security/appsec-review.md): the raw `Content-Type` a browser/client sends on
+ * upload was previously written straight to the `mime` column and echoed verbatim as the
+ * `Content-Type` response header on every download (`public-share.ts`) — no allowlist, so
+ * a crafted value (e.g. containing a control character) could corrupt that response
+ * header (a 500 on every subsequent download of the file). Lowercases, drops any
+ * `;charset=...`-style parameters (and anything else after the first `;`, which also
+ * strips a header-injection attempt hiding inside a "parameter"), strips control
+ * characters, then validates what's left against a conservative `type/subtype` grammar —
+ * anything that doesn't come out clean falls back to `application/octet-stream` rather
+ * than ever writing something download-time can't safely echo.
+ */
+export function normalizeMime(raw: string): string {
+  const beforeParams = raw.split(';', 1)[0] ?? '';
+  const cleaned = beforeParams
+    .replace(/[\x00-\x1f\x7f]/g, '')
+    .trim()
+    .toLowerCase();
+  return MIME_RE.test(cleaned) ? cleaned : DEFAULT_MIME;
+}
+
+// Kept identical to `SettingsService`'s cap so a file's name never has a smaller ceiling
+// than a subsequent settings save would allow.
+const DISPLAY_NAME_MAX_LENGTH = 255;
+const FALLBACK_DISPLAY_NAME = 'file';
+
+/**
+ * Cleans a client-supplied filename before it becomes the file's initial `display_name`
+ * (finding #5/#6, docs/security/appsec-review.md — "wherever display name ... enters",
+ * not only the settings-form edit path this row's remediation names): `display_name`
+ * flows verbatim into an outbound email subject and attachment filename
+ * (`reply-composer.ts`), so it must never carry CR/LF/control characters even when it's
+ * never touched through `/files/:id/settings`. Unlike the settings-form save (which
+ * rejects an over-length or empty name with a validation error the user can fix), an
+ * upload has no equivalent field to correct — a pathological or empty filename here
+ * silently truncates/falls back instead of failing the whole upload.
+ */
+function sanitizeInitialDisplayName(rawFilename: string): string {
+  const cleaned = rawFilename.replace(/[\x00-\x1f\x7f-\x9f]/g, '').trim();
+  const capped = cleaned.slice(0, DISPLAY_NAME_MAX_LENGTH);
+  return capped === '' ? FALLBACK_DISPLAY_NAME : capped;
+}
+
 export interface FileStatusView {
   status: FileRow['status'];
   publishStep: string;
@@ -84,10 +135,10 @@ export class FilesService {
 
     const row = await files.create(this.pool, {
       tenantId: params.tenantId,
-      displayName: params.originalName,
+      displayName: sanitizeInitialDisplayName(params.originalName),
       originalName: params.originalName,
       sizeBytes: bytes,
-      mime: params.mime,
+      mime: normalizeMime(params.mime),
       requestToken,
       publicSlug,
       stagingBlobId: id,

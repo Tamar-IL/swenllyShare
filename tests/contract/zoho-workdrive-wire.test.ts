@@ -116,6 +116,50 @@ describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
     expect(capturedBody).toContain('file content');
   });
 
+  it('upload (simple path): strips CR/LF/NUL from every multipart field value, not just the filename', async () => {
+    // Finding #3 (docs/security/appsec-review.md): the old code only sanitized the
+    // *file-part* filename attribute. `uploadSimple` also passes the same untrusted
+    // filename as the value of a plain `filename` field
+    // (`{ parent_id, filename: name, 'override-name-exist' }`) — that plain field value
+    // went straight into the multipart body unsanitized, so a CR/LF in the uploaded
+    // filename could terminate that field's line early and forge extra
+    // `Content-Disposition:` header lines / a bogus extra part.
+    const pool = mockAgent.get(API_ORIGIN);
+    let capturedContentType = '';
+    let capturedBody = '';
+    pool.intercept({ path: pathnameIs('/api/v1/upload'), method: 'POST' }).reply(async (opts) => {
+      capturedContentType = (opts.headers as Record<string, string>)['content-type'];
+      capturedBody = await readMockBodyText(opts.body);
+      return { statusCode: 200, data: { data: [{ attributes: { resource_id: 'res-1' } }] } };
+    });
+
+    const maliciousFilename =
+      'evil.pdf"\r\nContent-Disposition: form-data; name="parent_id"\r\n\r\ninjected-parent-id\r\n--forged\0';
+
+    const result = await store.upload(
+      'tenant-a',
+      Readable.from(Buffer.from('file content')),
+      12,
+      maliciousFilename,
+    );
+
+    expect(result.resourceId).toBe('res-1');
+    const boundary = capturedContentType.split('boundary=')[1];
+    if (!boundary) throw new Error('no boundary captured');
+    // Exactly the four real parts (parent_id, filename, override-name-exist, content) —
+    // an unstripped CR/LF/NUL in the filename would let the attacker terminate the
+    // field's line early and forge an actual extra `--boundary` part delimiter, which
+    // would inflate this count.
+    const partDelimiters = capturedBody.split(`--${boundary}`).length - 1;
+    expect(partDelimiters).toBe(5); // 4 part openings + 1 closing `--boundary--`
+    // The attacker's payload survives only as inert text glued onto the field's single
+    // line — no CR, LF, or NUL character made it into the body anywhere the sanitizer
+    // touched (the malicious value appears twice: once as the plain `filename` field,
+    // once as the file part's `filename=` attribute).
+    expect(capturedBody).toContain('injected-parent-id');
+    expect(capturedBody).not.toContain('\0');
+  });
+
   it('upload (large-file path): session init then ranged PUT chunks, finalizing on the last chunk', async () => {
     // Shrink both thresholds via the test-only config seam (see `ZohoFileStoreConfig`) so
     // this exercises real chunking logic against a few KB instead of allocating a real
@@ -328,6 +372,14 @@ describe('Zoho embed-token derivation and error classification (pure, no network
       'https://workdrive.zoho.test/link/plainTokenXYZ',
     );
     expect(token).toBe('plainTokenXYZ');
+  });
+
+  it('sanitizeMultipartValue strips CR, LF, and NUL but leaves everything else intact', () => {
+    expect(__testables.sanitizeMultipartValue('evil\r\nContent-Disposition: x\0')).toBe(
+      'evilContent-Disposition: x',
+    );
+    expect(__testables.sanitizeMultipartValue('plain-value.pdf')).toBe('plain-value.pdf');
+    expect(__testables.sanitizeMultipartValue('שם קובץ בעברית')).toBe('שם קובץ בעברית');
   });
 
   it('classifyZohoError maps 404/429/5xx per architecture.md §2', () => {

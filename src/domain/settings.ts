@@ -26,6 +26,17 @@ const USER_AT_HOST_RE =
   /^[^\s@]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
 const AT_DOMAIN_RE = /^@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
 
+// Findings #5/#6 (docs/security/appsec-review.md): `displayName` becomes an outbound
+// email subject and attachment filename, `customMessage` becomes the outbound body,
+// both verbatim (`reply-composer.ts`) — neither may carry CR/LF/control characters (which
+// could inject extra header lines or corrupt rendering), and neither may grow unbounded.
+const DISPLAY_NAME_MAX_LENGTH = 255;
+const CUSTOM_MESSAGE_MAX_LENGTH = 5000;
+
+function stripControlChars(value: string): string {
+  return value.replace(/[\x00-\x1f\x7f-\x9f]/g, '');
+}
+
 function validatePattern(pattern: string): string {
   const trimmed = pattern.trim().toLowerCase();
   if (!USER_AT_HOST_RE.test(trimmed) && !AT_DOMAIN_RE.test(trimmed)) {
@@ -100,13 +111,31 @@ export class SettingsService {
   ): Promise<FileRow> {
     const patch: Parameters<typeof files.updateSettings>[3] = {};
     if (input.displayName !== undefined) {
-      const trimmed = input.displayName.trim();
+      const trimmed = stripControlChars(input.displayName).trim();
       if (trimmed === '') {
         throw new AppError(ErrorCode.VALIDATION_ERROR, 400, 'displayName cannot be empty');
       }
+      if (trimmed.length > DISPLAY_NAME_MAX_LENGTH) {
+        throw new AppError(
+          ErrorCode.VALIDATION_ERROR,
+          400,
+          `displayName must be at most ${DISPLAY_NAME_MAX_LENGTH} characters`,
+        );
+      }
       patch.displayName = trimmed;
     }
-    if (input.customMessage !== undefined) patch.customMessage = input.customMessage;
+    if (input.customMessage !== undefined) {
+      const cleaned =
+        input.customMessage === null ? null : stripControlChars(input.customMessage).trim();
+      if (cleaned !== null && cleaned.length > CUSTOM_MESSAGE_MAX_LENGTH) {
+        throw new AppError(
+          ErrorCode.VALIDATION_ERROR,
+          400,
+          `customMessage must be at most ${CUSTOM_MESSAGE_MAX_LENGTH} characters`,
+        );
+      }
+      patch.customMessage = cleaned;
+    }
     if (input.expiryMode !== undefined) {
       patch.expiresAt = this.resolveExpiry(
         input.expiryMode,

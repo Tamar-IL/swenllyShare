@@ -124,13 +124,14 @@
           class="input"
           name="displayName"
           required
+          maxlength="255"
           value="<%= it.file.displayName %>"
         />
       </div>
 
       <div class="field">
         <label for="customMessage">הודעה אישית</label>
-        <textarea id="customMessage" class="input" name="customMessage" rows="3"><%= it.file.customMessage || '' %></textarea>
+        <textarea id="customMessage" class="input" name="customMessage" rows="3" maxlength="5000"><%= it.file.customMessage || '' %></textarea>
         <p class="input-help">הטקסט הזה יופיע במייל שנשלח בתגובה לבקשה.</p>
       </div>
 

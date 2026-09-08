@@ -100,6 +100,21 @@ async function readJsonBody(res: { body: { text(): Promise<string> } }): Promise
   }
 }
 
+/**
+ * Strips `\r`, `\n`, and NUL from a multipart field value (finding #3,
+ * docs/security/appsec-review.md): any of the three, unescaped, inside a
+ * `Content-Disposition:`/value line lets a caller-controlled string terminate that line
+ * early and inject additional header lines or even a fake `--boundary` part — CRLF/
+ * boundary injection into the outbound Zoho call. Applied to every field value AND the
+ * file-part filename (not just the filename, which is all the code previously covered);
+ * quotes are also stripped from the filename since it is the one value placed inside a
+ * quoted attribute. The random 128-bit boundary (`randomBytes(16)`) remains a second
+ * layer of defense — unguessable, so even an unstripped value can't deliberately forge
+ * it — but this fix means correctness no longer depends on that alone. */
+function sanitizeMultipartValue(value: string): string {
+  return value.replace(/[\r\n\0]/g, '');
+}
+
 /** Minimal, dependency-free `multipart/form-data` body builder — architecture.md §1 rules
  * out a Mailgun/HTTP client SDK, and the same "no SDK, hand-roll the one shape we need"
  * spirit applies here: `undici` has no built-in multipart *writer* (only a *parser* for
@@ -112,12 +127,13 @@ function buildMultipartBody(
 ): { stream: Readable; contentType: string } {
   const boundary = `swenlly-${randomBytes(16).toString('hex')}`;
   const CRLF = '\r\n';
-  const sanitizedFilename = filePart.filename.replace(/["\r\n]/g, '_');
+  const sanitizedFilename = sanitizeMultipartValue(filePart.filename).replace(/["]/g, '_');
 
   const preamble: string[] = [];
   for (const [key, value] of Object.entries(fields)) {
+    const sanitizedValue = sanitizeMultipartValue(value);
     preamble.push(
-      `--${boundary}${CRLF}Content-Disposition: form-data; name="${key}"${CRLF}${CRLF}${value}${CRLF}`,
+      `--${boundary}${CRLF}Content-Disposition: form-data; name="${key}"${CRLF}${CRLF}${sanitizedValue}${CRLF}`,
     );
   }
   preamble.push(
@@ -445,6 +461,7 @@ export const __testables = {
   classifyZohoError,
   extractOrDeriveEmbedToken,
   buildMultipartBody,
+  sanitizeMultipartValue,
   chunkStream,
   SIMPLE_UPLOAD_MAX_BYTES,
   ZOHO_CHUNK_SIZE_BYTES,

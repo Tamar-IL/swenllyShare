@@ -15,6 +15,7 @@ describe('loadConfig', () => {
     expect(config.PORT).toBe(3000);
     expect(config.LOG_LEVEL).toBe('info');
     expect(config.PGPOOL_MAX).toBe(10);
+    expect(config.PG_SSL).toBe(false);
     expect(config.ADAPTERS).toBe('fake');
     expect(config.BRANDED_PAGE_ENABLED).toBe(false);
     expect(config.ATTACH_LIMIT_BYTES).toBe(20_971_520);

@@ -51,6 +51,8 @@ CI (`.github/workflows/ci.yml`) runs typecheck → lint → prettier check → u
    persistent), `GOOGLE_SA_JSON_PATH` + `GOOGLE_IMPERSONATE_SUBJECT` +
    `GOOGLE_SHARED_DRIVE_ID`, `ZOHO_CLIENT_ID`/`ZOHO_CLIENT_SECRET`/`ZOHO_REFRESH_TOKEN`,
    `MAILGUN_API_KEY`/`MAILGUN_SIGNING_KEY`/`MAILGUN_SENDING_DOMAIN`/`OUTBOUND_FROM`.
+   `DATABASE_URL` must carry `sslmode=require` (or stricter) or `PG_SSL=true` must be set —
+   `src/db/pool.ts` refuses to boot in production without one of the two.
 3. **Migrate before start:** run `pnpm db:migrate` against the production `DATABASE_URL` as
    part of the release step, before traffic is routed to the new version. (The server also
    runs migrations on boot as a safety net — §"Local run" above — but don't rely on that

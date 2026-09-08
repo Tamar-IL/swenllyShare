@@ -48,6 +48,11 @@ export const configSchema = z.object({
   // --- Database ---
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   PGPOOL_MAX: intFromEnv(10, { min: 1 }),
+  // Explicitly turns on `ssl` for the pg.Pool (src/db/pool.ts), independent of whatever
+  // `DATABASE_URL` says. In production, `createPool` fails fast unless this is `true` OR
+  // `DATABASE_URL` itself carries `sslmode=require|verify-ca|verify-full` (finding #7,
+  // docs/security/appsec-review.md).
+  PG_SSL: boolFromEnv(false),
 
   // --- Sessions / cookies ---
   SESSION_SECRET: z.string().min(32, 'SESSION_SECRET must be at least 32 characters'),
