@@ -19,6 +19,8 @@ export default defineConfig({
             // Red-team regression cases (docs/security/red-team-report.md). Same harness,
             // same real-Postgres setup as the integration suite.
             'tests/redteam/**/*.test.ts',
+            // QA regression cases (docs/qa/qa-report-sender-app.md). Same harness.
+            'tests/qa/**/*.test.ts',
           ],
           environment: 'node',
           setupFiles: ['tests/setup/db.ts'],
