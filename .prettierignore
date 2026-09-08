@@ -1,0 +1,7 @@
+node_modules
+dist
+staging
+pnpm-lock.yaml
+docs/
+.claude/
+CLAUDE.md
