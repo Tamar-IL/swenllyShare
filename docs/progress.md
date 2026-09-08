@@ -15,3 +15,8 @@ Three lines per chunk, newest last. Live external calls made so far: **0**.
 - Lane A: scaffold + ten-table schema + tenant-scoped repositories + real-Postgres test harness (42 tests).
 - Lane B-core: ports, semantic fakes, domain services, the 10-gate inbound pipeline, SharingEngine, worker + handlers, full route table with placeholder views, verification ledger (0 verified-live / 14 unverified-live); 114 tests green.
 - Lane D: CI (real Postgres in CI via `scripts/dev-db.sh`), hadolint-clean Dockerfile, run-and-deploy runbook. Live external calls so far: **0**.
+
+## 2026-09-08 — Lanes B2 + C, red team, security fix pass (green)
+- Real Zoho/Drive/Mailgun adapters (all `@unverified-live`, offline wire tests via undici MockAgent) + `docs/runbooks/live-spikes.md`; Hebrew-first RTL UI browser-verified with Playwright.
+- Red team broke the inbound pipeline (Critical: DMARC verdict read from an attacker-writable namespace; four High). All 22 pinned regressions now pass after the fix pass (auth results from `Authentication-Results` only, RFC 5322 From parser, re-check at send time + at-most-once send, real expiry/sweep scheduling, rate-key normalization, body cap, Message-Id dedupe, kill switch `INBOUND_REQUESTS_ENABLED`).
+- Sender-app QA found 8 bugs (fix pass in flight). Suite: 272 tests. Live external calls so far: **0**.
