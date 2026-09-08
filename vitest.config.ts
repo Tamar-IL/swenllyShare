@@ -21,6 +21,8 @@ export default defineConfig({
             'tests/redteam/**/*.test.ts',
             // QA regression cases (docs/qa/qa-report-sender-app.md). Same harness.
             'tests/qa/**/*.test.ts',
+            // Code-review verification pins (docs/reviews/code-review.md). Same harness.
+            'tests/review/**/*.test.ts',
           ],
           environment: 'node',
           setupFiles: ['tests/setup/db.ts'],
