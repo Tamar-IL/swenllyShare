@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Least privilege: this workflow only reads the repo and calls hosted Postgres/apt — it
+# never needs to write back to GitHub.
+permissions:
+  contents: read
+
+# One run per ref at a time; a new push cancels the in-flight run for the same ref.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# CI must run the cluster as a non-root user (the GitHub-hosted runner's default
+# `runner` account), so give scripts/dev-db.sh a data directory that account can
+# create and own directly — sidesteps the root/`postgres`-user re-exec dance in
+# the script entirely (that path exists for engineers' machines and containers
+# that *do* start as root; it is exercised there, not here).
+env:
+  SWENLLY_PGDATA: ${{ github.workspace }}/.pgdata
+
+jobs:
+  ci:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Pinned to the exact version in package.json's `packageManager` field
+      # (pnpm@10.33.0) so CI always matches what engineers run locally.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Prettier check
+        run: pnpm exec prettier --check .
+
+      - name: Unit tests
+        run: pnpm test:unit
+
+      - name: Ensure PostgreSQL 16 server binaries are present
+        run: |
+          if [ ! -x /usr/lib/postgresql/16/bin/initdb ]; then
+            echo "PostgreSQL 16 server not found — installing (client tools are preinstalled on this runner, the server package is not)."
+            sudo apt-get update
+            sudo apt-get install -y postgresql-16
+          else
+            echo "PostgreSQL 16 server already present."
+          fi
+
+      - name: Start Postgres 16 (scripts/dev-db.sh)
+        run: scripts/dev-db.sh start
+
+      - name: Integration tests (real Postgres)
+        run: pnpm test:integration
+        env:
+          # scripts/dev-db.sh's fixed dev/test URLs (see `scripts/dev-db.sh url`).
+          TEST_DATABASE_URL: postgres://postgres@127.0.0.1:54329/swenlly_test
+          DATABASE_URL: postgres://postgres@127.0.0.1:54329/swenlly_dev
+
+      - name: Stop Postgres 16
+        if: always()
+        run: scripts/dev-db.sh stop
+
+      # TODO(backend-engineer): scripts/gen-verification-ledger.ts is a Lane B
+      # placeholder today — it only prints "not implemented" and always exits 0.
+      # Once it actually diffs docs/verification-ledger.md against the
+      # @unverified-live / @verified-live(date) markers in src/adapters/**
+      # (architecture.md §9), drop `continue-on-error` here so a stale ledger
+      # fails the build as intended.
+      - name: Verification ledger check
+        run: pnpm gen:ledger -- --check
+        continue-on-error: true
+
+      - name: Build
+        run: pnpm build
