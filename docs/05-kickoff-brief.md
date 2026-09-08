@@ -45,3 +45,22 @@ trust-safety + AI red team on the inbound-email/file-request attack surface, cri
 Plan your own sprints. One phase at a time; a phase is not "done" until you've **run it** and
 shown it works. Commit + push after each chunk; append a 3-line note to `docs/progress.md`. Run
 the proof gates before calling anything done.
+## Design bar — NON-NEGOTIABLE (founder's top priority)
+
+The UI/UX must be **world-class and international-standard.** This is the founder's #1 priority
+— the team owns that bar and must not under-invest. Treat design as a first-class workstream,
+not a finishing touch.
+
+- **Design gate before engineering.** Deploy **product-designer + ui-visual-designer** first.
+  Produce a real visual contract — `docs/03-design-language.md` + `docs/design-tokens.css`
+  (color, type, spacing, radius, shadow, motion, components) — and validate it BEFORE building
+  screens. Hold it to the standard of the Conductor's `docs/design-system.md`.
+- **Hebrew-first & RTL-first.** This is a Hebrew product for an Israeli audience. RTL layout,
+  Hebrew typography, and Hebrew copy are first-class from the first screen — never bolted on.
+- **Audience-appropriate aesthetic.** Clean, calm, trustworthy, highly legible for a
+  non-technical Haredi audience. Restraint over flash; the "invisible magic" must feel
+  effortless and dependable. Light + dark, both first-class.
+- **Accessibility (WCAG AA)** and **mobile-first responsiveness** are requirements, verified
+  with a real audit (e.g. axe), not assumed.
+- **The critic + a design-review gate check visual quality before anything ships.** A screen
+  that isn't world-class fails the gate and gets redone.
