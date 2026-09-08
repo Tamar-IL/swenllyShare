@@ -1,4 +1,5 @@
 import type { Queryable } from '../pool.js';
+import { jobs } from './jobs.js';
 
 export type FileStatus = 'staged' | 'publishing' | 'ready' | 'expired' | 'deleted' | 'failed';
 export type AllowlistMode = 'open' | 'allowlist';
@@ -69,6 +70,14 @@ const PUBLISH_STEP_COLUMNS: Record<keyof PublishStepUpdate, string> = {
 };
 
 export const files = {
+  /**
+   * F-5 (`docs/security/red-team-report.md`, RT-52): a file created with an expiry
+   * (`FilesService.createStaged` always sets one, from `DEFAULT_EXPIRY_DAYS`) schedules
+   * its own `file.expire` job right here — architecture.md §7's revocation job was built
+   * and unit-proven, but no production code path ever called `jobs.enqueue` for it, so
+   * expiry never actually revoked anything on the default (raw-Zoho-link) distribution
+   * path. `jobs.scheduleExpire` is a no-op when `expiresAt` is `null`.
+   */
   async create(db: Queryable, params: CreateFileParams): Promise<FileRow> {
     const { rows } = await db.query<FileRow>(
       `INSERT INTO files (
@@ -93,6 +102,7 @@ export const files = {
     );
     const row = rows[0];
     if (!row) throw new Error('files.create: insert returned no row');
+    await jobs.scheduleExpire(db, row.tenant_id, row.id, row.expires_at);
     return row;
   },
 
@@ -142,6 +152,11 @@ export const files = {
     return rows[0];
   },
 
+  /**
+   * F-5 (RT-52): whenever `expiresAt` is part of the patch — set, changed, or cleared —
+   * the `file.expire` schedule is updated to match, in the SAME call (not a separate step
+   * a caller could forget). See `create`'s doc comment for why this matters.
+   */
   async updateSettings(
     db: Queryable,
     tenantId: string,
@@ -170,7 +185,11 @@ export const files = {
        RETURNING *`,
       values,
     );
-    return rows[0];
+    const row = rows[0];
+    if (row && 'expiresAt' in patch) {
+      await jobs.scheduleExpire(db, tenantId, fileId, row.expires_at);
+    }
+    return row;
   },
 
   async markDeleted(db: Queryable, tenantId: string, fileId: string): Promise<FileRow | undefined> {
@@ -221,6 +240,32 @@ export const files = {
        ORDER BY created_at
        LIMIT $3`,
       [params.attachLimitBytes, params.olderThanHours, params.limit ?? 100],
+    );
+    return rows;
+  },
+
+  /**
+   * F-5's safety net: `ready` files past their own `expires_at` with no `file.expire` job
+   * currently pending/processing. Under normal operation `create`/`updateSettings`
+   * scheduling already covers every file, so this should almost always return nothing —
+   * it exists to catch anything that scheduling missed (a file created before this fix
+   * shipped, a lost race, manual data repair) rather than to be the primary mechanism.
+   */
+  async listExpiredWithoutScheduledJob(
+    db: Queryable,
+    params: { limit?: number } = {},
+  ): Promise<FileRow[]> {
+    const { rows } = await db.query<FileRow>(
+      `SELECT f.* FROM files f
+       WHERE f.status = 'ready' AND f.expires_at IS NOT NULL AND f.expires_at <= now()
+         AND NOT EXISTS (
+           SELECT 1 FROM jobs j
+           WHERE j.dedupe_key = 'expire:' || f.id::text
+             AND j.status IN ('pending', 'processing')
+         )
+       ORDER BY f.expires_at
+       LIMIT $1`,
+      [params.limit ?? 500],
     );
     return rows;
   },

@@ -3,7 +3,11 @@ import type { OutboundAttachment, OutboundMailPort } from '../../ports/outbound-
 import type { Clock } from '../../ports/clock.js';
 import { PermanentError, TransientError } from '../../ports/errors.js';
 import type { PortError } from '../../ports/errors.js';
-import { mapMailgunInboundPayload } from './mapping.js';
+import {
+  DEFAULT_MAILGUN_MAPPING_CONFIG,
+  mapMailgunInboundPayload,
+  type MailgunMappingConfig,
+} from './mapping.js';
 import { verifyMailgunSignature } from './signature.js';
 
 export interface MailgunConfig {
@@ -30,6 +34,12 @@ export class MailgunInboundAdapter implements InboundMailPort {
   constructor(
     private readonly config: MailgunConfig,
     private readonly clock: Clock,
+    // F-1: the DMARC/SPF/DKIM field-mapping config (authserv-id + which sources to trust)
+    // — see mapping.ts's doc comment. Optional so every existing call site (contract
+    // tests included) that only ever passed `(config, clock)` keeps compiling; production
+    // wiring (container.ts) always passes it explicitly, derived from `MAILGUN_AUTHSERV_ID`
+    // / `INBOUND_AUTH_SOURCE`.
+    private readonly mappingConfig: MailgunMappingConfig = DEFAULT_MAILGUN_MAPPING_CONFIG,
   ) {}
 
   /** @unverified-live */
@@ -39,7 +49,7 @@ export class MailgunInboundAdapter implements InboundMailPort {
 
   /** @unverified-live */
   parse(payload: Record<string, unknown>): InboundMessage {
-    return mapMailgunInboundPayload(payload);
+    return mapMailgunInboundPayload(payload, this.mappingConfig);
   }
 }
 

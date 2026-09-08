@@ -1,7 +1,12 @@
 import type { Container } from '../container.js';
-import { processNextJob } from './queue.js';
+import { ensureSweepsScheduled, PERIODIC_SWEEP_INTERVAL_MINUTES, processNextJob } from './queue.js';
 
 const POLL_INTERVAL_MS = 500;
+// F-5: how often the worker loop re-checks that the periodic sweep kinds are scheduled.
+// Deliberately shorter than PERIODIC_SWEEP_INTERVAL_MINUTES itself (dedupe means an
+// early re-check is a harmless no-op) so a worker that starts mid-window still gets the
+// current window's sweep enqueued promptly rather than waiting out the rest of it.
+const SWEEP_CHECK_INTERVAL_MS = Math.min(PERIODIC_SWEEP_INTERVAL_MINUTES * 60_000, 60_000);
 
 export interface WorkerLoopHandle {
   /** Resolves once every concurrent worker has finished its current job and stopped
@@ -41,6 +46,23 @@ export function startWorkerLoop(container: Container): WorkerLoopHandle {
   for (let i = 0; i < container.config.WORKER_CONCURRENCY; i++) {
     loops.push(runOne());
   }
+
+  // F-5: a dedicated, low-frequency loop (independent of WORKER_CONCURRENCY — one is
+  // enough, `ensureSweepsScheduled`'s dedupe key makes a redundant call harmless) that
+  // keeps `staging.purge`/`inbound.purge`/`expiry.safety_sweep` actually entering the
+  // queue. Runs once immediately at startup so a freshly-started worker doesn't wait out
+  // a full interval before the current window's sweep is scheduled.
+  async function runSweepScheduler(): Promise<void> {
+    while (!stopping) {
+      try {
+        await ensureSweepsScheduled(container);
+      } catch (err) {
+        console.error('worker loop: failed to schedule periodic sweeps', err);
+      }
+      await container.ports.clock.sleep(SWEEP_CHECK_INTERVAL_MS);
+    }
+  }
+  loops.push(runSweepScheduler());
 
   return {
     async stop() {

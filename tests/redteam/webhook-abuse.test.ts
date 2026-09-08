@@ -39,39 +39,40 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — public webhook endpoint abuse'
   });
 
   // ---------------------------------------------------------------- RT-40
-  it.fails(
-    'RT-40: an oversized multipart body must be rejected before it is buffered, not after a 401',
-    async () => {
-      const container = buildTestContainer();
-      const app = await buildApp({ container });
+  it('RT-40: an oversized multipart body must be rejected before it is buffered, not after a 401', async () => {
+    const container = buildTestContainer();
+    const app = await buildApp({ container });
 
-      // 200 junk field parts × 128 KiB = 25 MiB, with a signature that cannot verify.
-      const junk = 'A'.repeat(128 * 1024);
-      const fields: Array<[string, string]> = [
-        ['timestamp', String(Math.floor(Date.now() / 1000))],
-        ['token', 'anything'],
-        ['signature', 'deadbeef'.repeat(8)],
-      ];
-      for (let i = 0; i < 200; i++) fields.push([`junk-${i}`, junk]);
-      const { body, contentType } = buildMultipartFields(fields);
-      expect(body.length).toBeGreaterThan(20 * 1024 * 1024);
+    // 200 junk field parts × 128 KiB = 25 MiB, with a signature that cannot verify.
+    const junk = 'A'.repeat(128 * 1024);
+    const fields: Array<[string, string]> = [
+      ['timestamp', String(Math.floor(Date.now() / 1000))],
+      ['token', 'anything'],
+      ['signature', 'deadbeef'.repeat(8)],
+    ];
+    for (let i = 0; i < 200; i++) fields.push([`junk-${i}`, junk]);
+    const { body, contentType } = buildMultipartFields(fields);
+    expect(body.length).toBeGreaterThan(20 * 1024 * 1024);
 
-      const res = await app.inject({
-        method: 'POST',
-        url: '/webhooks/mailgun/inbound',
-        payload: body,
-        headers: { 'content-type': contentType },
-      });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/webhooks/mailgun/inbound',
+      payload: body,
+      headers: { 'content-type': contentType },
+    });
 
-      // Expected: a size cap refuses the body. Observed: 401 — the server parsed all
-      // 25 MiB into a JS object first, then decided the signature was bad.
-      expect(res.statusCode).toBe(413);
-    },
-  );
+    // Expected: a size cap refuses the body. Observed: 401 — the server parsed all
+    // 25 MiB into a JS object first, then decided the signature was bad.
+    expect(res.statusCode).toBe(413);
+  });
 
-  it('OBSERVED: the multipart branch accepts and fully buffers a 25 MiB unauthenticated body', async () => {
-    // The other half of RT-40, written as a passing test so the current behaviour is
-    // pinned and the fix is visibly a behaviour change.
+  it('F-10 fixed: an oversized multipart body is rejected by Content-Length alone, before any part is read', async () => {
+    // The other half of RT-40. This test used to pin the PRE-fix behavior (a 401, meaning
+    // the full 25 MiB got buffered and parsed before the HMAC check ever ran) — its own
+    // original comment said as much ("written as a passing test so the current behaviour
+    // is pinned and the fix is visibly a behaviour change"). Updated to assert the
+    // post-fix behavior directly, rather than leaving a stale pin that would now
+    // contradict RT-40 in the same file.
     const container = buildTestContainer();
     const app = await buildApp({ container });
     const junk = 'A'.repeat(128 * 1024);
@@ -89,10 +90,10 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — public webhook endpoint abuse'
       payload: body,
       headers: { 'content-type': contentType },
     });
-    expect(res.statusCode).toBe(401);
+    expect(res.statusCode).toBe(413);
   });
 
-  it('BLOCKED: the urlencoded branch IS capped by Fastify\'s default 1 MB bodyLimit', async () => {
+  it("BLOCKED: the urlencoded branch IS capped by Fastify's default 1 MB bodyLimit", async () => {
     // Contrast case — proves the gap is specific to the multipart branch, which is the
     // shape Mailgun uses whenever the inbound message carried an attachment.
     const container = buildTestContainer();
@@ -125,7 +126,9 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — public webhook endpoint abuse'
     const parts: Buffer[] = [];
     for (const [k, v] of Object.entries(payload)) {
       parts.push(
-        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${String(v)}\r\n`),
+        Buffer.from(
+          `--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${String(v)}\r\n`,
+        ),
       );
     }
     parts.push(

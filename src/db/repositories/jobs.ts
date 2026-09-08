@@ -58,18 +58,33 @@ export const jobs = {
    * select the same row: the loser's subquery simply skips the row the winner has
    * locked and finds the next one (or none).
    */
-  async claimNext(db: Queryable, kinds: string[]): Promise<JobRow | undefined> {
+  /**
+   * `now` decides which pending jobs count as "due" (`run_after <= now`) and defaults to
+   * the real wall clock. F-5 (`docs/security/red-team-report.md`): callers that schedule
+   * a job's `run_after` from an INJECTED `Clock` (e.g. `files.scheduleExpire` from
+   * `expires_at`) need `claimNext` compared against that SAME clock — a test (or a paced
+   * `SharingEngine` retry) that advances only the fake clock, not Postgres's real
+   * wall-clock time, must still be able to make that job claimable. `processNextJob`
+   * always passes `container.ports.clock.now()`; call sites with no `Container` in scope
+   * (the bare `jobs.ts` unit tests) get the real-time default, matching the original
+   * `now()`-in-SQL behavior exactly.
+   */
+  async claimNext(
+    db: Queryable,
+    kinds: string[],
+    now: Date = new Date(),
+  ): Promise<JobRow | undefined> {
     const { rows } = await db.query<JobRow>(
       `UPDATE jobs SET status = 'processing', locked_at = now()
        WHERE id = (
          SELECT id FROM jobs
-         WHERE status = 'pending' AND run_after <= now() AND kind = ANY($1)
+         WHERE status = 'pending' AND run_after <= $2 AND kind = ANY($1)
          ORDER BY run_after
          FOR UPDATE SKIP LOCKED
          LIMIT 1
        )
        RETURNING *`,
-      [kinds],
+      [kinds, now],
     );
     return rows[0];
   },
@@ -123,6 +138,70 @@ export const jobs = {
     return rows[0];
   },
 
+  /**
+   * F-5's periodic-sweep upsert (RT-53/RT-54): like `enqueue`, but a `dedupe_key` that
+   * already names a `done` job gets reactivated (`status` reset to `pending`) instead of
+   * silently no-op'd. Plain `enqueue`'s `ON CONFLICT ... DO NOTHING` is right for
+   * one-shot work (a webhook's `delivery.fulfill`, replaying it would re-send the file) —
+   * but a periodic sweep dedupe-keyed by TIME WINDOW is deliberately meant to run again
+   * for the same window if new work shows up after its first (empty, no-op) run within
+   * that window, which `DO NOTHING` would permanently block for the rest of the window.
+   * Never touches a `pending`/`processing` row — only a `done` one is reactivated, so this
+   * never disturbs a claim already in flight.
+   */
+  async ensureScheduled(
+    db: Queryable,
+    params: { kind: string; payload?: unknown; dedupeKey: string; runAfter?: Date },
+  ): Promise<void> {
+    await db.query(
+      `INSERT INTO jobs (kind, payload, dedupe_key, run_after)
+       VALUES ($1, $2, $3, COALESCE($4, now()))
+       ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL
+       DO UPDATE SET status = 'pending', locked_at = NULL
+       WHERE jobs.status = 'done'`,
+      [
+        params.kind,
+        JSON.stringify(params.payload ?? {}),
+        params.dedupeKey,
+        params.runAfter ?? null,
+      ],
+    );
+  },
+
+  /**
+   * F-5 (`docs/security/red-team-report.md`, RT-50/RT-51/RT-52): schedules `file.expire`
+   * for `fileId` at `expiresAt`, or cancels the schedule when `expiresAt` is `null` — the
+   * upsert `jobs.enqueue` alone can't do, since its `ON CONFLICT ... DO NOTHING` never
+   * *reschedules* an existing pending job to a new `run_after` when a sender changes a
+   * file's expiry after first setting it. Always keyed `expire:<fileId>` (one scheduled
+   * job per file, matching the report's exact wording) and always reset to `pending` on a
+   * change, even if a previous run already completed it — a sender who re-extends an
+   * already-expired file's expiry needs a fresh job, not a permanently spent dedupe slot.
+   */
+  async scheduleExpire(
+    db: Queryable,
+    tenantId: string,
+    fileId: string,
+    expiresAt: Date | null,
+  ): Promise<void> {
+    const dedupeKey = `expire:${fileId}`;
+    if (expiresAt === null) {
+      await db.query(
+        `DELETE FROM jobs WHERE dedupe_key = $1 AND status IN ('pending', 'processing')`,
+        [dedupeKey],
+      );
+      return;
+    }
+    await db.query(
+      `INSERT INTO jobs (kind, payload, dedupe_key, run_after)
+       VALUES ('file.expire', $2, $1, $3)
+       ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL
+       DO UPDATE SET run_after = EXCLUDED.run_after, status = 'pending', attempts = 0,
+                      locked_at = NULL, last_error = NULL`,
+      [dedupeKey, JSON.stringify({ tenantId, fileId }), expiresAt],
+    );
+  },
+
   async findById(db: Queryable, id: string): Promise<JobRow | undefined> {
     const { rows } = await db.query<JobRow>('SELECT * FROM jobs WHERE id = $1', [id]);
     return rows[0];
@@ -135,6 +214,18 @@ export const jobs = {
       dedupeKey,
     ]);
     return rows[0];
+  },
+
+  /** F-5: `/readyz`'s "have the periodic sweeps actually run recently" check — the most
+   * recent `created_at` among pending/processing/done jobs of `kind` (not `done` alone:
+   * a sweep that's merely scheduled and about to run within the window still counts as
+   * "the scheduler is alive", which is what this check is really verifying). */
+  async mostRecentScheduledAt(db: Queryable, kind: string): Promise<Date | null> {
+    const { rows } = await db.query<{ created_at: Date }>(
+      `SELECT created_at FROM jobs WHERE kind = $1 ORDER BY created_at DESC LIMIT 1`,
+      [kind],
+    );
+    return rows[0]?.created_at ?? null;
   },
 
   async countPending(db: Queryable): Promise<number> {

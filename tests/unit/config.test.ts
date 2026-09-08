@@ -32,6 +32,25 @@ describe('loadConfig', () => {
     expect(config.WORKER_ENABLED).toBe(true);
     expect(config.WORKER_CONCURRENCY).toBe(4);
     expect(config.JOB_MAX_ATTEMPTS).toBe(8);
+    // F-1/F-7/F-8/F-10 (red-team fixes) — see docs/security/red-team-report.md.
+    expect(config.RATE_DOMAIN_PER_HOUR).toBe(30);
+    expect(config.QUARANTINE_PER_TOKEN_PER_HOUR).toBe(5);
+    expect(config.INBOUND_AUTH_SOURCE).toBe('both');
+    expect(config.INBOUND_REQUESTS_ENABLED).toBe(true);
+    expect(config.WEBHOOK_BODY_LIMIT_BYTES).toBe(2 * 1024 * 1024);
+    expect(config.MAILGUN_AUTHSERV_ID).toBeUndefined();
+  });
+
+  it('F-1: INBOUND_REQUESTS_ENABLED and INBOUND_AUTH_SOURCE parse from env', () => {
+    const config = loadConfig({
+      ...REQUIRED_ENV,
+      INBOUND_REQUESTS_ENABLED: 'false',
+      INBOUND_AUTH_SOURCE: 'mailgun-fields',
+      MAILGUN_AUTHSERV_ID: 'mx.example.test',
+    });
+    expect(config.INBOUND_REQUESTS_ENABLED).toBe(false);
+    expect(config.INBOUND_AUTH_SOURCE).toBe('mailgun-fields');
+    expect(config.MAILGUN_AUTHSERV_ID).toBe('mx.example.test');
   });
 
   it('throws a readable, multi-issue message when required vars are missing', () => {

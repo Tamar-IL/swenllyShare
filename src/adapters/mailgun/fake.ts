@@ -2,7 +2,11 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { InboundMailPort, InboundMessage } from '../../ports/inbound-mail.js';
 import type { OutboundAttachment, OutboundMailPort } from '../../ports/outbound-mail.js';
 import type { Clock } from '../../ports/clock.js';
-import { mapMailgunInboundPayload } from './mapping.js';
+import {
+  DEFAULT_MAILGUN_MAPPING_CONFIG,
+  mapMailgunInboundPayload,
+  type MailgunMappingConfig,
+} from './mapping.js';
 
 const SIGNATURE_WINDOW_SECONDS = 5 * 60;
 
@@ -33,6 +37,9 @@ export class FakeInboundMail implements InboundMailPort {
   constructor(
     private readonly signingKey: string,
     private readonly clock: Clock,
+    // F-1: same mapping config as the real adapter (see mapping.ts) — optional, defaulted,
+    // so existing `new FakeInboundMail(key, clock)` call sites keep compiling.
+    private readonly mappingConfig: MailgunMappingConfig = DEFAULT_MAILGUN_MAPPING_CONFIG,
   ) {}
 
   async verify(fields: { timestamp: string; token: string; signature: string }): Promise<boolean> {
@@ -54,7 +61,7 @@ export class FakeInboundMail implements InboundMailPort {
   }
 
   parse(payload: Record<string, unknown>): InboundMessage {
-    return mapMailgunInboundPayload(payload);
+    return mapMailgunInboundPayload(payload, this.mappingConfig);
   }
 }
 

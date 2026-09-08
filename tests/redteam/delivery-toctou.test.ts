@@ -39,63 +39,54 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — authorise-then-deliver TOCTOU 
   }
 
   // ---------------------------------------------------------------- RT-10
-  it.fails(
-    'RT-10: a file that expires between enqueue and fulfilment must not be mailed out',
-    async () => {
-      const container = buildTestContainer();
-      const { tenant, file } = await queueOneDelivery(container);
-      const sentBefore = container.fakes.outboundMail.sent.length;
+  it('RT-10: a file that expires between enqueue and fulfilment must not be mailed out', async () => {
+    const container = buildTestContainer();
+    const { tenant, file } = await queueOneDelivery(container);
+    const sentBefore = container.fakes.outboundMail.sent.length;
 
-      // Sender sets a short expiry; virtual time then passes it before the worker runs.
-      await files.updateSettings(container.pool, tenant.id, file.id, {
-        expiresAt: new Date(container.fakes.clock.now().getTime() + 60_000),
-      });
-      container.fakes.clock.advance(10 * 60_000);
+    // Sender sets a short expiry; virtual time then passes it before the worker runs.
+    await files.updateSettings(container.pool, tenant.id, file.id, {
+      expiresAt: new Date(container.fakes.clock.now().getTime() + 60_000),
+    });
+    container.fakes.clock.advance(10 * 60_000);
 
-      await runPendingJobs(container);
+    await runPendingJobs(container);
 
-      expect(container.fakes.outboundMail.sent).toHaveLength(sentBefore);
-    },
-  );
+    expect(container.fakes.outboundMail.sent).toHaveLength(sentBefore);
+  });
 
   // ---------------------------------------------------------------- RT-11
-  it.fails(
-    'RT-11: a file the sender DELETES between enqueue and fulfilment must not be mailed out',
-    async () => {
-      const container = buildTestContainer();
-      const { tenant, file } = await queueOneDelivery(container);
-      const sentBefore = container.fakes.outboundMail.sent.length;
+  it('RT-11: a file the sender DELETES between enqueue and fulfilment must not be mailed out', async () => {
+    const container = buildTestContainer();
+    const { tenant, file } = await queueOneDelivery(container);
+    const sentBefore = container.fakes.outboundMail.sent.length;
 
-      // "Take it down now" — the only emergency control the sender has.
-      await files.markDeleted(container.pool, tenant.id, file.id);
+    // "Take it down now" — the only emergency control the sender has.
+    await files.markDeleted(container.pool, tenant.id, file.id);
 
-      await runPendingJobs(container);
+    await runPendingJobs(container);
 
-      expect(container.fakes.outboundMail.sent).toHaveLength(sentBefore);
-      const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
-      expect(rows[0]?.outcome).not.toBe('sent');
-    },
-  );
+    expect(container.fakes.outboundMail.sent).toHaveLength(sentBefore);
+    const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
+    expect(rows[0]?.outcome).not.toBe('sent');
+  });
 
   // ---------------------------------------------------------------- RT-12
-  it.fails(
-    'RT-12: tightening the allowlist between enqueue and fulfilment must not be bypassed',
-    async () => {
-      const container = buildTestContainer();
-      const { tenant, file } = await queueOneDelivery(container);
-      const sentBefore = container.fakes.outboundMail.sent.length;
+  it('RT-12: tightening the allowlist between enqueue and fulfilment must not be bypassed', async () => {
+    const container = buildTestContainer();
+    const { tenant, file } = await queueOneDelivery(container);
+    const sentBefore = container.fakes.outboundMail.sent.length;
 
-      // Sender realises the requester should never have been served and locks the file
-      // down to an allowlist that excludes them.
-      await files.updateSettings(container.pool, tenant.id, file.id, {
-        allowlistMode: 'allowlist',
-      });
+    // Sender realises the requester should never have been served and locks the file
+    // down to an allowlist that excludes them.
+    await files.updateSettings(container.pool, tenant.id, file.id, {
+      allowlistMode: 'allowlist',
+    });
 
-      await runPendingJobs(container);
+    await runPendingJobs(container);
 
-      expect(container.fakes.outboundMail.sent).toHaveLength(sentBefore);
-    },
-  );
+    expect(container.fakes.outboundMail.sent).toHaveLength(sentBefore);
+  });
 
   // ---------------------------------------------------------------- RT-13
   // `delivery.fulfill` sends first and records second. Any failure after the provider has
@@ -103,39 +94,36 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — authorise-then-deliver TOCTOU 
   // error on `deliveries.complete`) re-runs the WHOLE handler on retry — including the
   // send. The webhook replay gate exists precisely because "replay is re-disclosure"
   // (architecture.md §4.2); the same principle is not applied one layer down.
-  it.fails(
-    'RT-13: a `delivery.fulfill` retry must not re-send the file (at-most-once disclosure)',
-    async () => {
-      const container = buildTestContainer();
-      const { tenant, file } = await queueOneDelivery(container);
-      const recorder = container.fakes.outboundMail;
-      const sentBefore = recorder.sent.length;
+  it('RT-13: a `delivery.fulfill` retry must not re-send the file (at-most-once disclosure)', async () => {
+    const container = buildTestContainer();
+    const { tenant, file } = await queueOneDelivery(container);
+    const recorder = container.fakes.outboundMail;
+    const sentBefore = recorder.sent.length;
 
-      // The provider accepted the message; we never saw the ack.
-      let failNextSend = true;
-      const flaky: OutboundMailPort = {
-        async send(message) {
-          const result = await recorder.send(message);
-          if (failNextSend) {
-            failNextSend = false;
-            throw new Error('socket hang up after the provider accepted the message');
-          }
-          return result;
-        },
-      };
-      (container.ports as { outboundMail: OutboundMailPort }).outboundMail = flaky;
+    // The provider accepted the message; we never saw the ack.
+    let failNextSend = true;
+    const flaky: OutboundMailPort = {
+      async send(message) {
+        const result = await recorder.send(message);
+        if (failNextSend) {
+          failNextSend = false;
+          throw new Error('socket hang up after the provider accepted the message');
+        }
+        return result;
+      },
+    };
+    (container.ports as { outboundMail: OutboundMailPort }).outboundMail = flaky;
 
-      await runPendingJobs(container);
-      // The queue backs the job off; a real worker picks it up on the next tick.
-      await testPool().query(`UPDATE jobs SET run_after = now() WHERE kind = 'delivery.fulfill'`);
-      await runPendingJobs(container);
+    await runPendingJobs(container);
+    // The queue backs the job off; a real worker picks it up on the next tick.
+    await testPool().query(`UPDATE jobs SET run_after = now() WHERE kind = 'delivery.fulfill'`);
+    await runPendingJobs(container);
 
-      const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
-      expect(rows[0]?.outcome).toBe('sent');
-      // The file left the building exactly once.
-      expect(recorder.sent.length - sentBefore).toBe(1);
-    },
-  );
+    const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
+    expect(rows[0]?.outcome).toBe('sent');
+    // The file left the building exactly once.
+    expect(recorder.sent.length - sentBefore).toBe(1);
+  });
 
   // ---------------------------------------------------------------- blocked
   it('BLOCKED: a file already expired at request time never enqueues a delivery', async () => {

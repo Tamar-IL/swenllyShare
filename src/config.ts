@@ -83,9 +83,19 @@ export const configSchema = z.object({
   RATE_FILE_PER_HOUR: intFromEnv(60, { min: 1 }),
   RATE_TENANT_PER_HOUR: intFromEnv(300, { min: 1 }),
   RATE_MAGICLINK_PER_HOUR: intFromEnv(5, { min: 1 }),
+  // F-8 (red-team RT-30/RT-30b/RT-31): a per-requester-domain ceiling, checked alongside
+  // the per-file bucket so a single domain (or catch-all mailbox) cannot silently consume
+  // a whole file's hourly budget. Default sits well below the default RATE_FILE_PER_HOUR
+  // (60) — see `src/domain/rate-limit.ts` for the file-fairness logic this pairs with.
+  RATE_DOMAIN_PER_HOUR: intFromEnv(30, { min: 1 }),
 
   // --- Inbound retention ---
   RAW_PAYLOAD_RETENTION_DAYS: intFromEnv(7, { min: 0 }),
+  // F-7: pre-authentication quarantine writes (pipeline gates 4-6, all of which can write
+  // before gate 7's rate check) are bounded per resolved request-token, per hour, in
+  // Postgres — beyond the cap, the request is still answered 200 but nothing more is
+  // written (`src/domain/request-pipeline.ts`).
+  QUARANTINE_PER_TOKEN_PER_HOUR: intFromEnv(5, { min: 1 }),
 
   // --- Google ---
   GOOGLE_CREDENTIAL_MODE: z.enum(['service_account', 'oauth_refresh']).default('service_account'),
@@ -120,6 +130,27 @@ export const configSchema = z.object({
   MAILGUN_SIGNING_KEY: z.string().optional(),
   MAILGUN_SENDING_DOMAIN: z.string().optional(),
   OUTBOUND_FROM: z.string().optional(),
+  // F-1: the RFC 8601 `authserv-id` our own DMARC/SPF/DKIM verdict should be filed under
+  // in a captured `Authentication-Results` header (`src/adapters/mailgun/mapping.ts`).
+  // No fixed default in this schema — `@unverified-live` until a real payload is captured
+  // (docs/runbooks/live-spikes.md spike #3) — `container.ts` falls back to `INBOUND_DOMAIN`
+  // when this is unset, which is a documented guess, not a confirmed fact.
+  MAILGUN_AUTHSERV_ID: z.string().optional(),
+  // F-1: which source(s) `mapMailgunInboundPayload` trusts for DMARC/SPF/DKIM. See
+  // mapping.ts's doc comment for what each value means; `both` (default) prefers the
+  // Authentication-Results-header path and falls back to the classic lowercase Mailgun
+  // fields only when that path yields nothing.
+  INBOUND_AUTH_SOURCE: z.enum(['authentication-results', 'mailgun-fields', 'both']).default('both'),
+  // F-1 kill switch: the inbound email-request path stays gated behind this until a live
+  // Mailgun payload has been captured and the auth-results field guess above is confirmed
+  // (architecture.md §12's unverified item). `false` still 401/406s on a bad signature or
+  // malformed address (those gates never depended on the auth-results guess) but every
+  // otherwise-valid webhook is quarantined with reason `inbound_disabled` instead of ever
+  // reaching the DMARC gate — no code deploy needed to hold or resume the path.
+  INBOUND_REQUESTS_ENABLED: boolFromEnv(true),
+  // F-10: caps the inbound webhook's body before Fastify (and, for multipart, busboy)
+  // parses any of it — sized just above Mailgun's documented payload ceiling.
+  WEBHOOK_BODY_LIMIT_BYTES: intFromEnv(2 * 1024 * 1024, { min: 1 }),
 
   // --- Worker ---
   WORKER_ENABLED: boolFromEnv(true),

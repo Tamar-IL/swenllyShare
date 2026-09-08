@@ -59,7 +59,15 @@ describe.skipIf(!hasTestDatabase())('inbound injection (AC-R2)', () => {
     expect(rows).toHaveLength(0);
   });
 
-  it('a well-formed but unknown request_token is rejected with 406, not disclosed as "unknown"', async () => {
+  it('a well-formed but unknown request_token is answered exactly like a known one that later fails, not disclosed', async () => {
+    // F-9 fix note (docs/security/red-team-report.md, RT-21): this used to assert 406 for
+    // an unknown token, but 406 vs. 200 was itself the oracle — a KNOWN token that then
+    // fails some other gate (DMARC, allowlist, ...) was already 200, so returning 406 here
+    // let anyone distinguish "no such token" from "that token exists" without ever seeing
+    // this response body. Fixed: an unknown-but-well-formed token is now also a silent
+    // 200, matching architecture.md §4.4's own invariant ("no disclosure of whether a
+    // token ever existed"). 406 stays reserved for gate 3's genuinely unparseable
+    // recipient (the test above this one), which is a real "stop retrying" signal.
     const container = buildTestContainer();
     const { tenant } = await createTenantWithReadyFile(container, 'unknowntoken@example.com');
 
@@ -71,7 +79,8 @@ describe.skipIf(!hasTestDatabase())('inbound injection (AC-R2)', () => {
     });
 
     const outcome = await container.services.requestPipeline.handleWebhook(payload);
-    expect(outcome.status).toBe(406);
+    expect(outcome.status).toBe(200);
+    expect(outcome.deliveryId).toBeUndefined();
   });
 
   it('the "--" separator is accepted with the exact same effect as "+"', async () => {

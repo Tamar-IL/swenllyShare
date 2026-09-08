@@ -35,30 +35,27 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — rate-gate evasion', () => {
   }
 
   // ---------------------------------------------------------------- RT-30
-  it.fails(
-    'RT-30: sub-addressing (`user+tag@host`) must not multiply the per-requester budget',
-    async () => {
-      const container = buildTestContainer({
-        RATE_REQUESTER_PER_HOUR: 3,
-        RATE_FILE_PER_HOUR: 1000,
-        RATE_TENANT_PER_HOUR: 1000,
-      });
-      const { tenant, file } = await createTenantWithReadyFile(container, 'rl-plus@example.com');
+  it('RT-30: sub-addressing (`user+tag@host`) must not multiply the per-requester budget', async () => {
+    const container = buildTestContainer({
+      RATE_REQUESTER_PER_HOUR: 3,
+      RATE_FILE_PER_HOUR: 1000,
+      RATE_TENANT_PER_HOUR: 1000,
+    });
+    const { tenant, file } = await createTenantWithReadyFile(container, 'rl-plus@example.com');
 
-      for (let i = 0; i < 12; i++) {
-        await fire(container, tenant.slug, file.request_token, `mallory+${i}@relay.test`);
-      }
+    for (let i = 0; i < 12; i++) {
+      await fire(container, tenant.slug, file.request_token, `mallory+${i}@relay.test`);
+    }
 
-      const rows = await deliveries.listForFile(container.pool, tenant.id, file.id, {
-        limit: 1000,
-      });
-      const queued = rows.filter((r) => r.outcome === 'queued');
-      // All 12 land in the same real mailbox; the budget is 3.
-      expect(queued.length).toBeLessThanOrEqual(3);
-    },
-  );
+    const rows = await deliveries.listForFile(container.pool, tenant.id, file.id, {
+      limit: 1000,
+    });
+    const queued = rows.filter((r) => r.outcome === 'queued');
+    // All 12 land in the same real mailbox; the budget is 3.
+    expect(queued.length).toBeLessThanOrEqual(3);
+  });
 
-  it.fails('RT-30b: Gmail dot-insertion must not multiply the per-requester budget', async () => {
+  it('RT-30b: Gmail dot-insertion must not multiply the per-requester budget', async () => {
     const container = buildTestContainer({
       RATE_REQUESTER_PER_HOUR: 2,
       RATE_FILE_PER_HOUR: 1000,
@@ -85,30 +82,27 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — rate-gate evasion', () => {
   // mailbox) can therefore consume a file's ENTIRE hourly budget with distinct addresses,
   // and every legitimate requester for the rest of the hour is silently refused — the UX
   // brief's "silence is the correct response" turns a nuisance into an invisible outage.
-  it.fails(
-    'RT-31: one requester domain must not be able to consume a whole file\'s hourly budget',
-    async () => {
-      const container = buildTestContainer({
-        RATE_REQUESTER_PER_HOUR: 1000,
-        RATE_FILE_PER_HOUR: 6,
-        RATE_TENANT_PER_HOUR: 1000,
-      });
-      const { tenant, file } = await createTenantWithReadyFile(container, 'rl-dos@example.com');
+  it("RT-31: one requester domain must not be able to consume a whole file's hourly budget", async () => {
+    const container = buildTestContainer({
+      RATE_REQUESTER_PER_HOUR: 1000,
+      RATE_FILE_PER_HOUR: 6,
+      RATE_TENANT_PER_HOUR: 1000,
+    });
+    const { tenant, file } = await createTenantWithReadyFile(container, 'rl-dos@example.com');
 
-      for (let i = 0; i < 6; i++) {
-        await fire(container, tenant.slug, file.request_token, `bot-${i}@attacker.test`);
-      }
+    for (let i = 0; i < 6; i++) {
+      await fire(container, tenant.slug, file.request_token, `bot-${i}@attacker.test`);
+    }
 
-      // A real recipient, first request of the hour, different domain.
-      const legit = await fire(
-        container,
-        tenant.slug,
-        file.request_token,
-        'real.person@customer.test',
-      );
-      expect(legit.deliveryId).toBeDefined();
-    },
-  );
+    // A real recipient, first request of the hour, different domain.
+    const legit = await fire(
+      container,
+      tenant.slug,
+      file.request_token,
+      'real.person@customer.test',
+    );
+    expect(legit.deliveryId).toBeDefined();
+  });
 
   // ---------------------------------------------------------------- blocked
   it('BLOCKED: case variants of one address share a single bucket', async () => {
@@ -150,9 +144,7 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — rate-gate evasion', () => {
         dmarc: 'pass',
       }),
     );
-    await Promise.all(
-      payloads.map((p) => container.services.requestPipeline.handleWebhook(p)),
-    );
+    await Promise.all(payloads.map((p) => container.services.requestPipeline.handleWebhook(p)));
 
     const rows = await deliveries.listForFile(container.pool, tenant.id, file.id, { limit: 100 });
     expect(rows).toHaveLength(10);

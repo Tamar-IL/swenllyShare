@@ -14,7 +14,10 @@ describe.skipIf(!hasTestDatabase())('migrate (idempotency)', () => {
     expect(second.applied).toEqual([]);
 
     const { rows } = await pool.query('SELECT filename FROM schema_migrations');
-    expect(rows.map((r) => r.filename)).toEqual(['0001_init.sql']);
+    expect(rows.map((r) => r.filename)).toEqual([
+      '0001_init.sql',
+      '0002_delivery_sending_state.sql',
+    ]);
   });
 
   it('all ten domain tables plus schema_migrations exist', async () => {

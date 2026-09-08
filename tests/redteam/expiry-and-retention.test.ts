@@ -23,27 +23,24 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — expiry revocation and retentio
   });
 
   // ---------------------------------------------------------------- RT-50
-  it.fails(
-    'RT-50: passing expires_at must revoke the Zoho public link (the shipping default distribution link)',
-    async () => {
-      const container = buildTestContainer();
-      const { tenant, file } = await createTenantWithReadyFile(container, 'exp-zoho@example.com');
-      expect(file.zoho_link_id).toBeTruthy();
+  it('RT-50: passing expires_at must revoke the Zoho public link (the shipping default distribution link)', async () => {
+    const container = buildTestContainer();
+    const { tenant, file } = await createTenantWithReadyFile(container, 'exp-zoho@example.com');
+    expect(file.zoho_link_id).toBeTruthy();
 
-      await files.updateSettings(container.pool, tenant.id, file.id, {
-        expiresAt: new Date(container.fakes.clock.now().getTime() + 60_000),
-      });
-      container.fakes.clock.advance(24 * 60 * 60_000);
-      await runPendingJobs(container);
+    await files.updateSettings(container.pool, tenant.id, file.id, {
+      expiresAt: new Date(container.fakes.clock.now().getTime() + 60_000),
+    });
+    container.fakes.clock.advance(24 * 60 * 60_000);
+    await runPendingJobs(container);
 
-      // AC-U4: "after the set window, the distribution link ... no longer grant[s] access".
-      // With BRANDED_PAGE_ENABLED off (the shipping default, AC-U2) the distribution link
-      // IS the raw Zoho link — nothing in front of it to check expiry.
-      expect(container.fakes.fileStore.links.get(file.zoho_link_id!)?.revoked).toBe(true);
-    },
-  );
+    // AC-U4: "after the set window, the distribution link ... no longer grant[s] access".
+    // With BRANDED_PAGE_ENABLED off (the shipping default, AC-U2) the distribution link
+    // IS the raw Zoho link — nothing in front of it to check expiry.
+    expect(container.fakes.fileStore.links.get(file.zoho_link_id!)?.revoked).toBe(true);
+  });
 
-  it.fails('RT-51: passing expires_at must revoke Drive permissions already granted', async () => {
+  it('RT-51: passing expires_at must revoke Drive permissions already granted', async () => {
     const container = buildTestContainer({ ATTACH_LIMIT_BYTES: 1 });
     const { tenant, file } = await createTenantWithReadyFile(container, 'exp-drive@example.com', {
       content: 'a much larger payload than the attach limit',
@@ -72,7 +69,7 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — expiry revocation and retentio
     expect(container.fakes.driveShare.permissionCount(driveFileId!)).toBe(0);
   });
 
-  it.fails('RT-52: setting an expiry must schedule the `file.expire` job', async () => {
+  it('RT-52: setting an expiry must schedule the `file.expire` job', async () => {
     const container = buildTestContainer();
     const { tenant, file } = await createTenantWithReadyFile(container, 'exp-sched@example.com');
     await files.updateSettings(container.pool, tenant.id, file.id, {
@@ -86,34 +83,31 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — expiry revocation and retentio
   });
 
   // ---------------------------------------------------------------- RT-53
-  it.fails(
-    'RT-53: raw inbound payloads must actually be purged past RAW_PAYLOAD_RETENTION_DAYS',
-    async () => {
-      const container = buildTestContainer({ RAW_PAYLOAD_RETENTION_DAYS: 7 });
-      const { tenant, file } = await createTenantWithReadyFile(container, 'purge@example.com');
+  it('RT-53: raw inbound payloads must actually be purged past RAW_PAYLOAD_RETENTION_DAYS', async () => {
+    const container = buildTestContainer({ RAW_PAYLOAD_RETENTION_DAYS: 7 });
+    const { tenant, file } = await createTenantWithReadyFile(container, 'purge@example.com');
 
-      await container.services.requestPipeline.handleWebhook(
-        buildSignedWebhookPayload(container, {
-          requestToken: file.request_token,
-          tenantSlug: tenant.slug,
-          fromAddress: 'requester@relay.test',
-          dmarc: 'pass',
-          bodyPlain: 'personal content that should not survive retention',
-        }),
-      );
-      // Fast-forward the retention deadline the way 8 days of wall clock would.
-      await testPool().query(`UPDATE inbound_messages SET purge_after = now() - interval '1 day'`);
+    await container.services.requestPipeline.handleWebhook(
+      buildSignedWebhookPayload(container, {
+        requestToken: file.request_token,
+        tenantSlug: tenant.slug,
+        fromAddress: 'requester@relay.test',
+        dmarc: 'pass',
+        bodyPlain: 'personal content that should not survive retention',
+      }),
+    );
+    // Fast-forward the retention deadline the way 8 days of wall clock would.
+    await testPool().query(`UPDATE inbound_messages SET purge_after = now() - interval '1 day'`);
 
-      await runPendingJobs(container);
+    await runPendingJobs(container);
 
-      const { rows } = await testPool().query<{ n: string }>(
-        `SELECT count(*)::text AS n FROM inbound_messages WHERE raw_payload IS NOT NULL`,
-      );
-      expect(Number(rows[0]?.n)).toBe(0);
-    },
-  );
+    const { rows } = await testPool().query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM inbound_messages WHERE raw_payload IS NOT NULL`,
+    );
+    expect(Number(rows[0]?.n)).toBe(0);
+  });
 
-  it.fails('RT-54: staged blobs past the retention window must actually be purged', async () => {
+  it('RT-54: staged blobs past the retention window must actually be purged', async () => {
     const container = buildTestContainer({ ATTACH_LIMIT_BYTES: 1, STAGING_RETENTION_HOURS: 1 });
     const { tenant, file } = await createTenantWithReadyFile(container, 'stage@example.com', {
       content: 'bytes larger than the attach limit stay staged for no reason',

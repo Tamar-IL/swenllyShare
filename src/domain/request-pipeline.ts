@@ -5,8 +5,10 @@ import { fileAllowlist } from '../db/repositories/file-allowlist.js';
 import { files } from '../db/repositories/files.js';
 import { inboundMessages, type InboundMessageRow } from '../db/repositories/inbound-messages.js';
 import { jobs } from '../db/repositories/jobs.js';
+import { rateLimits } from '../db/repositories/rate-limits.js';
 import { tenants } from '../db/repositories/tenants.js';
 import { parseRequestAddress } from '../lib/addressing.js';
+import { addressDomain } from '../lib/email-address.js';
 import type { Clock } from '../ports/clock.js';
 import type { InboundMailPort } from '../ports/inbound-mail.js';
 import type { RateLimitService } from './rate-limit.js';
@@ -21,7 +23,15 @@ export interface PipelineOutcome {
 export interface RequestPipelineConfig {
   INBOUND_DOMAIN: string;
   RAW_PAYLOAD_RETENTION_DAYS: number;
+  /** F-1 kill switch: when false, every otherwise-valid webhook is quarantined with
+   * reason `inbound_disabled` instead of ever reaching the DMARC gate. */
+  INBOUND_REQUESTS_ENABLED: boolean;
+  /** F-7: caps how many pre-authentication quarantine writes one resolved request-token
+   * can cause per hour. */
+  QUARANTINE_PER_TOKEN_PER_HOUR: number;
 }
+
+const QUARANTINE_CAP_WINDOW_MINUTES = 60;
 
 /**
  * The inbound request pipeline (architecture.md §4) — gates run in this exact order, the
@@ -66,24 +76,43 @@ export class RequestPipeline {
     if (insertResult.duplicate) return { status: 200 };
     const inboundRow = insertResult.row;
 
+    // F-1 kill switch: hold the entire inbound path closed (no gate below this one ever
+    // runs) until INBOUND_REQUESTS_ENABLED is flipped on — meant for holding the path
+    // shut while the DMARC/SPF/DKIM field-name guess in mapping.ts is still unverified
+    // against a live payload (docs/runbooks/live-spikes.md spike #3). Gated on a verified
+    // signature (gate 1 already ran) so this can't become a new unauthenticated write
+    // surface of its own.
+    if (!this.config.INBOUND_REQUESTS_ENABLED) {
+      await inboundMessages.markQuarantined(this.pool, inboundRow.id, 'inbound_disabled');
+      return { status: 200 };
+    }
+
     // Gate 3: envelope-recipient parse.
     const parsedAddress = parseRequestAddress(msg.recipientRaw, this.config.INBOUND_DOMAIN);
     if (!parsedAddress) return { status: 406 };
 
     // Gate 4: tenant + file resolve by token (the ONLY way an address resolves to a file).
     const file = await files.resolveByRequestToken(this.pool, parsedAddress.token);
-    if (!file) return { status: 406 };
+    if (!file) {
+      // F-9: an unknown-but-well-formed token must not be distinguishable from a known
+      // token that later fails some other gate (both are silent 200s) — the status code
+      // was the oracle Mailgun (and anyone watching from outside) could read (RT-21). 406
+      // stays reserved for gate 3's genuinely unparseable-recipient case, which really is
+      // the "stop retrying, this route will never work" signal Mailgun should get.
+      return { status: 200 };
+    }
     await inboundMessages.attachResolution(this.pool, inboundRow.id, {
       tenantId: file.tenant_id,
       fileId: file.id,
     });
 
     const requesterAddress = msg.fromAddresses[0];
-    const fromDomain = requesterAddress?.split('@')[1];
+    const fromDomain = requesterAddress ? addressDomain(requesterAddress) : undefined;
 
     const tenantForSlug = await tenants.findBySlug(this.pool, parsedAddress.slug);
     if (!tenantForSlug || tenantForSlug.id !== file.tenant_id) {
       await this.quarantine(
+        parsedAddress.token,
         inboundRow,
         file.tenant_id,
         file.id,
@@ -97,6 +126,7 @@ export class RequestPipeline {
     // Gate 5: DMARC. Never re-derived, never inferred as pass from absence.
     if (msg.dmarc !== 'pass') {
       await this.quarantine(
+        parsedAddress.token,
         inboundRow,
         file.tenant_id,
         file.id,
@@ -111,6 +141,7 @@ export class RequestPipeline {
     // domain when the provider reports one.
     if (msg.fromAddresses.length !== 1 || !requesterAddress || !fromDomain) {
       await this.quarantine(
+        parsedAddress.token,
         inboundRow,
         file.tenant_id,
         file.id,
@@ -122,6 +153,7 @@ export class RequestPipeline {
     }
     if (msg.dmarcDomain && msg.dmarcDomain.toLowerCase() !== fromDomain) {
       await this.quarantine(
+        parsedAddress.token,
         inboundRow,
         file.tenant_id,
         file.id,
@@ -216,7 +248,19 @@ export class RequestPipeline {
     return { status: 200, deliveryId };
   }
 
+  /**
+   * F-7 (`docs/security/red-team-report.md`, RT-20): every pre-authentication quarantine
+   * path (gates 4-6's tenant-slug-mismatch, DMARC-fail, and From-sanity failures) funnels
+   * through here, and here is where the per-token write cap lives — anyone who has ever
+   * been handed a mailto link can trigger this path with zero authentication of their
+   * own, so the write itself must be bounded, not just the *rate* of delivery. Beyond
+   * `QUARANTINE_PER_TOKEN_PER_HOUR`, the counter still increments (so the cap keeps
+   * counting, cheaply) but neither `inbound_messages.quarantined`/`reason` nor a new
+   * `deliveries` row is written — the caller still answers 200 either way (never
+   * disclosing which branch fired).
+   */
   private async quarantine(
+    requestToken: string,
     inboundRow: InboundMessageRow,
     tenantId: string,
     fileId: string,
@@ -224,6 +268,13 @@ export class RequestPipeline {
     dmarc: string | null,
     reason: string,
   ): Promise<void> {
+    const total = await rateLimits.incrementAndSum(
+      this.pool,
+      `quarantine-token:${requestToken}`,
+      QUARANTINE_CAP_WINDOW_MINUTES,
+    );
+    if (total > this.config.QUARANTINE_PER_TOKEN_PER_HOUR) return;
+
     await inboundMessages.markQuarantined(this.pool, inboundRow.id, reason);
     await deliveries.insertTerminal(this.pool, {
       tenantId,

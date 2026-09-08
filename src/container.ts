@@ -173,11 +173,23 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
     sendingDomain: config.MAILGUN_SENDING_DOMAIN ?? '',
     outboundFrom: config.OUTBOUND_FROM ?? '',
   };
+  // F-1: `MAILGUN_AUTHSERV_ID` has no fixed schema default — falling back to
+  // `INBOUND_DOMAIN` here (not in config.ts) keeps that fallback visible as a deliberate,
+  // documented guess rather than a silent schema default; `mapping.ts`'s doc comment and
+  // docs/runbooks/live-spikes.md spike #3 explain why it's still `@unverified-live`.
+  const mailgunMappingConfig = {
+    authservId: config.MAILGUN_AUTHSERV_ID ?? config.INBOUND_DOMAIN,
+    authSource: config.INBOUND_AUTH_SOURCE,
+  };
   const inboundMail: InboundMailPort =
     overrides?.inboundMail ??
     (modes.mailgun === 'fake'
-      ? new FakeInboundMail(mailgunConfig.signingKey || 'dev-signing-key', clock)
-      : new MailgunInboundAdapter(mailgunConfig, clock));
+      ? new FakeInboundMail(
+          mailgunConfig.signingKey || 'dev-signing-key',
+          clock,
+          mailgunMappingConfig,
+        )
+      : new MailgunInboundAdapter(mailgunConfig, clock, mailgunMappingConfig));
   const outboundMail: OutboundMailPort =
     overrides?.outboundMail ??
     (modes.mailgun === 'fake' ? new FakeOutboundMail() : new MailgunOutboundAdapter(mailgunConfig));
@@ -200,6 +212,7 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
     RATE_REQUESTER_PER_HOUR: config.RATE_REQUESTER_PER_HOUR,
     RATE_FILE_PER_HOUR: config.RATE_FILE_PER_HOUR,
     RATE_TENANT_PER_HOUR: config.RATE_TENANT_PER_HOUR,
+    RATE_DOMAIN_PER_HOUR: config.RATE_DOMAIN_PER_HOUR,
   });
 
   const services: Services = {
@@ -226,6 +239,8 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
     requestPipeline: new RequestPipeline(pool, { inboundMail, clock }, rateLimit, {
       INBOUND_DOMAIN: config.INBOUND_DOMAIN,
       RAW_PAYLOAD_RETENTION_DAYS: config.RAW_PAYLOAD_RETENTION_DAYS,
+      INBOUND_REQUESTS_ENABLED: config.INBOUND_REQUESTS_ENABLED,
+      QUARANTINE_PER_TOKEN_PER_HOUR: config.QUARANTINE_PER_TOKEN_PER_HOUR,
     }),
     sharingEngine: new SharingEngine(pool, driveShare, clock, {
       DRIVE_SHARE_SOFT_CAP: config.DRIVE_SHARE_SOFT_CAP,

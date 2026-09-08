@@ -376,3 +376,204 @@ allowlist in `mapping.ts` (does stripping the message-header namespace also stri
 pipeline needs?), the re-check inside `delivery.fulfill` (does it introduce a new TOCTOU against
 `drive_copies`?), and the new expiry scheduler (can an attacker cause `file.expire` to be
 scheduled for someone else's file, or starve it?).
+
+---
+
+## 6. Fix status (backend-engineer pass, 2026-09-08)
+
+All 22 `it.fails` regression cases in `tests/redteam/` are flipped to `it` and pass, alongside
+the full existing suite (`pnpm test` — 269 passed, plus 5 pre-existing `it.fails` in
+`tests/qa/**` that belong to a separate QA pass, not this one). No red-team test was deleted or
+weakened; two non-redteam integration tests and one redteam assertion that encoded the exact
+bug being fixed were corrected (noted below) so their expectations match the fixed behavior
+rather than the vulnerability. Details, decisions, and what was not verified are in this
+session's backend-engineer report; this section is the finding-by-finding summary.
+
+### F-1 · CRITICAL · fixed
+`src/adapters/mailgun/mapping.ts` no longer probes guessed key names for DMARC/SPF/DKIM.
+`extractAuthResult` reads only (a) an `Authentication-Results` entry in Mailgun's documented
+`message-headers` JSON array — topmost entry whose `authserv-id` matches config
+`MAILGUN_AUTHSERV_ID` (defaults to `INBOUND_DOMAIN`, `container.ts`) — with a degraded top-level
+`Authentication-Results` field fallback when `message-headers` is absent, or (b) the classic
+guessed fields kept ONLY in their exact lowercase form (`dmarc`, `spf`, `dkim`, `dmarc-domain`,
+matching Mailgun's own naming convention for synthetic fields); the Title-Case/`X-Mailgun-*`
+variants that collided with MIME-header-shaped attacker input are gone entirely. Either source is
+discarded if the same field name also appears in `message-headers` (the attacker-controlled-MIME-
+header guard). New config `INBOUND_AUTH_SOURCE` (`authentication-results|mailgun-fields|both`,
+default `both`) selects the source(s); `INBOUND_REQUESTS_ENABLED` (default `true`) is the kill
+switch — `false` quarantines every signature-verified webhook with reason `inbound_disabled`
+before any auth-results extraction runs. `docs/runbooks/live-spikes.md` spike 3 now documents the
+`message-headers` capture step and the kill-switch-during-capture procedure.
+Tests: `RT-01`, `RT-01b`, `RT-05` (auth-gate-bypass.test.ts) + new unit coverage
+(`tests/unit/mailgun-mapping.test.ts`) for the `message-headers` path the pinned suite itself
+never exercises (its payloads never populate `message-headers`).
+**Still `@unverified-live`** — this is a mapping-logic fix proven against synthetic payloads, not
+a live-payload confirmation. The field-name guess remains a guess until spike 3 is actually run.
+
+### F-2 · HIGH · partially fixed — see disagreement note
+The root-cause bug (alignment silently skipped because `dmarcDomain` extraction failed to find
+the domain even when the provider reported it) is fixed by F-1's mapping rewrite: `dmarcDomain`
+is now correctly read from `Authentication-Results`, so gate 6's existing
+`if (dmarcDomain && mismatch)` check now actually fires (RT-02).
+**I did NOT implement** the stronger recommendation in this finding's own "Fix" note — quarantine
+whenever `dmarc === 'pass'` but no domain can be read AT ALL (reason `dmarc_alignment_unknown`).
+Doing so breaks 6 already-pinned tests in the same file (`auth-gate-bypass.test.ts`'s `SANITY`
+positive-control and the 5 `DOCUMENTED` case/whitespace-tolerance cases), which explicitly send
+`dmarc: 'pass'` with no domain field at all and assert delivery succeeds — matching
+architecture.md §4.6's own conditional wording ("When the provider reports which domain DMARC
+was evaluated against..."). This is a real inconsistency inside the red-team's own pinned suite:
+this finding's narrative wants unconditional fail-closed, but `SANITY`/`DOCUMENTED` in the same
+file pin the lenient behavior for exactly the case that narrative would newly reject. I did not
+break pinned tests to resolve it unilaterally. Recommend trust-safety/architect decide which side
+gives: rewrite `SANITY`/`DOCUMENTED` to always include a `dmarcDomain`, or accept the narrower fix.
+Test: `RT-02` passes as-is; `SANITY`/`DOCUMENTED`×5/case-whitespace test still pass, unchanged.
+
+### F-3 · HIGH · fixed
+New `src/lib/email-address.ts`: a hand-written RFC 5322-ish mailbox parser (display names,
+quoted strings, parenthesized comments, comma-separated lists) replacing the old
+bracket/bare-address regex. Requires exactly one `@` in the addr-spec (rejects the two-`@`
+bypass), derives the domain from the LAST `@`, IDN-normalizes via `url.domainToASCII`, and
+rejects a display name that itself looks like an address (the display-name-spoof case — see
+disagreement note below). `mapping.ts` uses it for `From`, and cross-checks Mailgun's own `from`
+field when present, rejecting on disagreement (`RT-03`). The same normalized address is used for
+delivery, the allowlist check, and (via `addressDomain()`) the rate-limit domain bucket.
+**Disagreement, resolved in favor of the pinned test:** the report's closing note suggests this
+fix should let a real requester who puts an email address in their display name through
+("parsing the header properly instead of regex-scraping it"). I kept the CURRENT
+reject-when-display-name-looks-like-an-address behavior instead, because the pinned
+`"BLOCKED: display-name spoof..."` test in the same file asserts rejection with reason
+`from_address_invalid` — a genuinely correct RFC 5322 parse would accept it as one address with a
+decorative name, which would flip that pinned test. I judged the defensive reject worth keeping
+(a display name containing a full email address is itself a classic spoofing pattern) at the cost
+of the false-positive the report names; noted in `email-address.ts`'s own doc comment.
+Tests: `RT-04`, `RT-05` (chained), `RT-03`; `BLOCKED: display-name spoof` and
+`BLOCKED: <victim>, <attacker>` (two-address) unchanged; new `tests/unit/email-address.test.ts`.
+
+### F-4 · HIGH · fixed
+`src/jobs/handlers/delivery-fulfill.ts` re-reads the file fresh and re-evaluates expiry/status
+and the allowlist immediately before the external send, completing the delivery
+`expired`/`not_allowlisted` instead of sending if either now fails. Tests: `RT-10`, `RT-11`,
+`RT-12`.
+
+### F-5 · HIGH · fixed
+`files.create`/`files.updateSettings` (`src/db/repositories/files.ts`) now call
+`jobs.scheduleExpire` whenever `expires_at` is set, changed, or cleared — dedupe key
+`expire:<fileId>`, always reset to `pending` on a change (RT-52). `src/jobs/queue.ts`'s new
+`ensureSweepsScheduled` enqueues `staging.purge`/`inbound.purge`/`expiry.safety_sweep`
+(deduped per 15-minute window, reactivating a `done` job for a new window's work instead of
+`enqueue`'s one-shot `DO NOTHING`) — called at the start of `runPendingJobs` (so tests exercise
+real scheduling, not hand-enqueued jobs) and from a dedicated low-frequency loop in
+`src/jobs/loop.ts`'s `startWorkerLoop`. `expiry.safety_sweep` is a new job kind
+(`src/jobs/handlers/expiry-safety-sweep.ts`) that catches any `ready` file past `expires_at`
+with no scheduled job — the belt for the scheduling belt-and-braces. `/readyz` now reports
+`sweepsHealthy` and each sweep kind's last-scheduled time. Tests: `RT-50`, `RT-51`, `RT-52`,
+`RT-53`, `RT-54`; new `tests/integration/readyz.test.ts` and `jobs.test.ts` additions.
+**Implementation note surfaced along the way (not a red-team finding, fixed as part of this
+work):** `jobs.claimNext`'s "is this job due" check compared against Postgres's real `now()`,
+which cannot be advanced by a test's `FakeClock.advance()` — a job scheduled from a future point
+on the injected clock (exactly what `scheduleExpire` does) would never become claimable in a
+test that only advances virtual time. Fixed by giving `claimNext` an optional `now` parameter;
+`processNextJob` passes `max(injected clock, real Date.now())`, so ordinary immediate jobs are
+unaffected (real time still decides) while a job's own future clock-relative schedule can be
+reached by advancing that same clock.
+
+### F-6 · MEDIUM · fixed
+New `outcome = 'sending'` (migration `0002_delivery_sending_state.sql`, widening the
+`deliveries_outcome_check` constraint) set via a compare-and-swap
+(`deliveryFulfillment.markSending`, `src/db/repositories/delivery-fulfillment.ts`) immediately
+before the external send call. A retry that finds a delivery already `sending` does NOT call the
+outbound port again — it finalizes `sent` directly, re-deriving the mechanism deterministically.
+`sent` itself is a no-op on any further retry. A `SharingEngine` pacing defer (no external call
+made) reverts `sending` back to `queued` so the rescheduled attempt runs the normal path, not a
+false finalize. Test: `RT-13`.
+**Deviation from this finding's literal "goes to `failed`...unless a definite non-send" note:**
+`RT-13`'s scenario is exactly a non-definite (ambiguous, "socket hang up after the provider
+accepted the message") failure, and the pinned assertion requires the FINAL outcome to be `sent`,
+not `failed`. I implemented "found `sending` on a fresh attempt → finalize `sent`, never resend"
+uniformly, since resolving an ambiguous in-flight state toward `sent` (accepting a small risk of
+an inaccurate status) is strictly safer than `failed` (which some other design might retry and
+risk a genuine duplicate send) or leaving it stuck. `queue.ts`'s existing dead-letter hook
+(`runDeadLetterHook`, unchanged) still marks a delivery `failed` if its job exhausts
+`JOB_MAX_ATTEMPTS` outright — that path is what actually implements a hard-failure terminal
+state; RT-13's own 2-attempt scenario never reaches it. I did not add typed
+"port reported a definite non-send" classification for the outbound send call specifically — no
+pinned test requires it and the existing `PortError` taxonomy (`src/ports/errors.ts`) is
+available for a future adapter to use if that distinction becomes load-bearing.
+
+### F-7 · MEDIUM · fixed
+Every pre-authentication quarantine write (`RequestPipeline.quarantine`, the shared path for
+gate 4's tenant-slug-mismatch, gate 5's DMARC failure, and gate 6's From-sanity failures) is now
+capped per resolved request-token, per hour, via a Postgres counter
+(`quarantine-token:<token>` in `rate_limit_counters`, config `QUARANTINE_PER_TOKEN_PER_HOUR`,
+default 5) — beyond the cap the counter still increments (cheap) but no `inbound_messages`/
+`deliveries` write happens; the caller still answers 200 either way. Test: `RT-20`.
+**Not implemented:** the `@fastify/rate-limit` per-IP layer this finding's report text also
+suggests. The webhook route already has `@fastify/rate-limit` at 600/min (pre-existing,
+unrelated to this finding), and no pinned test asks for a stricter per-IP cap specifically —
+the per-token Postgres cap is what RT-20 exercises and is IP-independent (correct for a webhook
+whose real caller is always Mailgun's own infrastructure, not the attacker's IP).
+
+### F-8 · MEDIUM · fixed
+`src/domain/rate-limit.ts`'s requester bucket key strips a `+tag` sub-address and, for
+`gmail.com`/`googlemail.com` only, strips dots (RT-30, RT-30b). A new global per-domain-per-hour
+bucket (`RATE_DOMAIN_PER_HOUR`, default 30) is checked alongside the existing three. For RT-31's
+specific scenario (one domain saturating a single file's own small budget), the per-file check
+adds a fairness rule: a request is let through past the raw `RATE_FILE_PER_HOUR` ceiling if its
+own domain's share of that file's traffic so far is at most half — a dominant domain gets no such
+exception (keeping `RATE_FILE_PER_HOUR: many distinct requesters...still trip the per-file limit`
+passing unchanged, same domain, no fairness question to arbitrate), but a new domain always gets
+through even when an existing dominant domain has already consumed the raw limit. This fairness
+rule is documented in `rate-limit.ts` as a deliberate design choice with a named residual gap
+(rotating across many distinct domains could still exceed a file's raw budget) — no pinned test
+requires closing that gap and `RATE_TENANT_PER_HOUR`/`RATE_DOMAIN_PER_HOUR` still bound it.
+Tests: `RT-30`, `RT-30b`, `RT-31`; existing rate-limit tests (case-folding, concurrent requests,
+tenant-bucket, cross-file) all still pass unchanged.
+
+### F-9 · LOW · fixed, differently from this finding's own literal wording
+Gate 4's unknown-token path now returns 200 (silent, writes nothing) instead of 406 — matching a
+known token that later fails some other gate, which was already 200. 406 stays reserved for gate
+3's genuinely unparseable recipient. Test: `RT-21`.
+This finding's summary line above ("F-9: ... return 406 for both") is inconsistent with both the
+finding's own detailed "Fix" paragraph (which says the opposite: 200 for unknown-token, 406 kept
+for unparseable) and with what `RT-21` actually needs (it compares a known-but-failing request,
+already 200, against an unknown token — making them match requires the unknown token to become
+200). Implemented per the finding's detailed paragraph and the pinned test, not the summary line.
+One non-redteam integration test asserted the old 406-for-unknown-token behavior directly
+(`tests/integration/inbound-injection.test.ts`); updated it to assert 200, with a comment
+explaining why — it was pinning the exact oracle this finding exists to close.
+
+### F-10 · MEDIUM · fixed
+`POST /webhooks/mailgun/inbound` now sets `bodyLimit: WEBHOOK_BODY_LIMIT_BYTES` (default 2 MiB)
+and checks `Content-Length` explicitly before parsing anything (the route's core `bodyLimit`
+does not by itself cap the multipart branch, since `@fastify/multipart` streams outside
+Fastify's core body-parsing path) — a request whose declared length exceeds the cap is answered
+413 without reading a single byte. `parseWebhookBody`'s multipart branch also now passes explicit
+`limits` to `request.parts()` and stops reading further parts as soon as `timestamp`/`token`/
+`signature` have all been seen (Mailgun's own stable, documented fields), so even a request that
+lies about `Content-Length` never has its junk fields read. Test: `RT-40`.
+One non-redteam-labeled-but-adjacent test in the same file ("OBSERVED: the multipart branch
+accepts and fully buffers...") explicitly pinned the PRE-fix 401 behavior, with its own comment
+saying the fix should make it visibly change — updated to assert 413, per that comment's own
+stated intent, not left contradicting `RT-40` in the same file.
+
+### F-11 · LOW · fixed
+`inboundMessages.insertOrDuplicate`'s `INSERT ... ON CONFLICT` no longer names `signature_token`
+as the sole arbiter — `ON CONFLICT DO NOTHING` (no target) now catches a violation of either
+unique index (`signature_token` OR the pre-existing `provider_message_id` unique index from
+migration 0001 — that index already existed; the bug was the `ON CONFLICT` clause not covering
+it, so a `provider_message_id` collision fell through as an uncaught exception instead of the
+graceful `{duplicate: true}` the method's own doc comment always promised). No new migration was
+needed for uniqueness itself. Test: `RT-22`; `tests/integration/inbound-messages-replay.test.ts`'s
+"provider_message_id is also unique" test previously asserted the old THROWING behavior
+(demonstrating the bug, not guarding against it) — updated to assert the graceful dedupe.
+
+### F-12 · INFORMATIONAL · not fixed, deliberately
+Both sub-findings left as-is:
+- The CSP `frame-src` scoping fix requires editing `src/http/plugins/security-headers.ts`, which
+  is explicitly out of this pass's remit (owned by concurrent frontend work per the orchestrator's
+  instructions).
+- Adding per-IP rate limiting to `/s/:slug`/`/s/:slug/download` would flip the pinned
+  `"OBSERVED: neither public route is rate-limited..."` test (currently asserting no 429 ever
+  fires), which this pass's instructions direct against weakening without being asked.
+Both `OBSERVED` tests in `public-share-surface.test.ts` are unchanged and still pass, documenting
+current (unfixed) behavior as originally intended.

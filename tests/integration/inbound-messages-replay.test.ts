@@ -59,21 +59,35 @@ describe.skipIf(!hasTestDatabase())(
       expect(rows[0].count).toBe(1);
     });
 
-    it('provider_message_id is also unique', async () => {
+    it('provider_message_id is also unique, and a collision is flagged, not thrown (F-11)', async () => {
+      // F-11 fix note (docs/security/red-team-report.md, RT-22): a `provider_message_id`
+      // collision used to fall through as an uncaught unique-violation exception, because
+      // `insertOrDuplicate`'s `ON CONFLICT (signature_token)` named only ONE of the two
+      // unique indexes as its arbiter — a different message re-injected under a fresh
+      // Mailgun `signature_token` (a forwarding loop, a provider re-delivery) hit the
+      // OTHER index and was never gracefully deduped. Fixed by targeting no explicit
+      // conflict column (`ON CONFLICT DO NOTHING`), which catches either index — this
+      // test now asserts the graceful `{duplicate: true}` the method's own doc comment
+      // always promised, matching the sibling `signature_token` tests above.
       const pool = testPool();
-      await inboundMessages.insertOrDuplicate(pool, {
+      const first = await inboundMessages.insertOrDuplicate(pool, {
         providerMessageId: 'dup-provider-id',
         signatureToken: 'sig-a',
         recipientRaw: 'a@b.com',
       });
+      expect(first.duplicate).toBe(false);
 
-      await expect(
-        inboundMessages.insertOrDuplicate(pool, {
-          providerMessageId: 'dup-provider-id',
-          signatureToken: 'sig-b',
-          recipientRaw: 'a@b.com',
-        }),
-      ).rejects.toThrow();
+      const second = await inboundMessages.insertOrDuplicate(pool, {
+        providerMessageId: 'dup-provider-id',
+        signatureToken: 'sig-b',
+        recipientRaw: 'a@b.com',
+      });
+      expect(second.duplicate).toBe(true);
+
+      const { rows } = await pool.query(
+        "SELECT count(*)::int AS count FROM inbound_messages WHERE provider_message_id = 'dup-provider-id'",
+      );
+      expect(rows[0].count).toBe(1);
     });
   },
 );

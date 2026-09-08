@@ -21,19 +21,28 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — addressing, routing and replay
 
   // ---------------------------------------------------------------- blocked: grammar
   it.each([
-    ['multiple envelope recipients', `cust-${validSlug}+file-${validToken}@share.swenlly.test, x@y.test`],
+    [
+      'multiple envelope recipients',
+      `cust-${validSlug}+file-${validToken}@share.swenlly.test, x@y.test`,
+    ],
     ['angle-bracket wrapper', `<cust-${validSlug}+file-${validToken}@share.swenlly.test>`],
     ['trailing dot on the domain', `cust-${validSlug}+file-${validToken}@share.swenlly.test.`],
     ['lookalike domain', `cust-${validSlug}+file-${validToken}@share.swenlly.test.evil.test`],
     ['unicode homoglyph domain', `cust-${validSlug}+file-${validToken}@ѕhare.swenlly.test`],
     ['token one char short', `cust-${validSlug}+file-${'a'.repeat(25)}@share.swenlly.test`],
     ['token one char long', `cust-${validSlug}+file-${'a'.repeat(27)}@share.swenlly.test`],
-    ['second token appended', `cust-${validSlug}+file-${validToken}+file-${validToken}@share.swenlly.test`],
+    [
+      'second token appended',
+      `cust-${validSlug}+file-${validToken}+file-${validToken}@share.swenlly.test`,
+    ],
     ['slug omitted', `cust-+file-${validToken}@share.swenlly.test`],
     ['no separator', `cust-${validSlug}file-${validToken}@share.swenlly.test`],
     ['underscore separator', `cust-${validSlug}_file-${validToken}@share.swenlly.test`],
     ['single dash separator', `cust-${validSlug}-file-${validToken}@share.swenlly.test`],
-    ['leading whitespace + newline', `\ncust-${validSlug}+file-${validToken}@share.swenlly.test\nx`],
+    [
+      'leading whitespace + newline',
+      `\ncust-${validSlug}+file-${validToken}@share.swenlly.test\nx`,
+    ],
   ])('BLOCKED: %s does not parse', (_name, address) => {
     expect(parseRequestAddress(address, 'share.swenlly.test')).toBeNull();
   });
@@ -41,7 +50,10 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — addressing, routing and replay
   it.each([
     ['plain `+` form', `cust-${validSlug}+file-${validToken}@share.swenlly.test`],
     ['`--` mangled form', `cust-${validSlug}--file-${validToken}@share.swenlly.test`],
-    ['uppercase', `CUST-${validSlug.toUpperCase()}+FILE-${validToken.toUpperCase()}@SHARE.SWENLLY.TEST`],
+    [
+      'uppercase',
+      `CUST-${validSlug.toUpperCase()}+FILE-${validToken.toUpperCase()}@SHARE.SWENLLY.TEST`,
+    ],
     ['surrounding whitespace', `  cust-${validSlug}+file-${validToken}@share.swenlly.test  `],
   ])('ACCEPTED (by design): %s', (_name, address) => {
     expect(parseRequestAddress(address, 'share.swenlly.test')).toEqual({
@@ -51,7 +63,7 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — addressing, routing and replay
   });
 
   // ---------------------------------------------------------------- blocked: cross-tenant
-  it('BLOCKED: tenant A\'s slug with tenant B\'s token is quarantined, never delivered', async () => {
+  it("BLOCKED: tenant A's slug with tenant B's token is quarantined, never delivered", async () => {
     const container = buildTestContainer();
     const a = await createTenantWithReadyFile(container, 'xt-a@example.com');
     const b = await createTenantWithReadyFile(container, 'xt-b@example.com');
@@ -83,31 +95,28 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — addressing, routing and replay
   // has ever been handed a mailto link can therefore write unbounded rows into that
   // tenant's audit log, and unbounded `inbound_messages` rows each carrying the attacker's
   // full raw payload for RAW_PAYLOAD_RETENTION_DAYS.
-  it.fails(
-    'RT-20: pre-authentication quarantine writes must be rate-limited, not unbounded',
-    async () => {
-      const container = buildTestContainer({ RATE_REQUESTER_PER_HOUR: 3 });
-      const { tenant, file } = await createTenantWithReadyFile(container, 'flood@example.com');
+  it('RT-20: pre-authentication quarantine writes must be rate-limited, not unbounded', async () => {
+    const container = buildTestContainer({ RATE_REQUESTER_PER_HOUR: 3 });
+    const { tenant, file } = await createTenantWithReadyFile(container, 'flood@example.com');
 
-      for (let i = 0; i < 25; i++) {
-        await container.services.requestPipeline.handleWebhook(
-          buildSignedWebhookPayload(container, {
-            requestToken: file.request_token,
-            tenantSlug: tenant.slug,
-            fromAddress: 'attacker@relay.test',
-            dmarc: 'fail',
-            bodyPlain: 'x'.repeat(4096),
-          }),
-        );
-      }
+    for (let i = 0; i < 25; i++) {
+      await container.services.requestPipeline.handleWebhook(
+        buildSignedWebhookPayload(container, {
+          requestToken: file.request_token,
+          tenantSlug: tenant.slug,
+          fromAddress: 'attacker@relay.test',
+          dmarc: 'fail',
+          bodyPlain: 'x'.repeat(4096),
+        }),
+      );
+    }
 
-      const rows = await deliveries.listForFile(container.pool, tenant.id, file.id, {
-        limit: 1000,
-      });
-      // Expected: the rate gate caps how much an unauthenticated requester can write.
-      expect(rows.length).toBeLessThanOrEqual(5);
-    },
-  );
+    const rows = await deliveries.listForFile(container.pool, tenant.id, file.id, {
+      limit: 1000,
+    });
+    // Expected: the rate gate caps how much an unauthenticated requester can write.
+    expect(rows.length).toBeLessThanOrEqual(5);
+  });
 
   // ---------------------------------------------------------------- RT-21
   // architecture.md §4.4: "Unknown token → 406, no disclosure of whether a token ever
@@ -115,7 +124,7 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — addressing, routing and replay
   // "that token exists". Mailgun surfaces the two differently to the sender (a 406 tells
   // the route to stop and can produce a delivery-failure notice; a 200 is silent), so the
   // oracle is observable from outside without ever seeing our HTTP response.
-  it.fails('RT-21: an unknown token must not be distinguishable from a known one', async () => {
+  it('RT-21: an unknown token must not be distinguishable from a known one', async () => {
     const container = buildTestContainer();
     const { tenant, file } = await createTenantWithReadyFile(container, 'oracle@example.com');
 
@@ -185,7 +194,7 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — addressing, routing and replay
   // de-duplicates the *message*. Mailgun's signature `token` is per-POST, so any path that
   // re-injects the same RFC 5322 message (two matching routes, a forwarded bounce loop, a
   // provider-side re-delivery with a fresh token) re-discloses the file.
-  it.fails('RT-22: the same Message-Id must not be delivered twice under a new signature', async () => {
+  it('RT-22: the same Message-Id must not be delivered twice under a new signature', async () => {
     const container = buildTestContainer();
     const { tenant, file } = await createTenantWithReadyFile(container, 'msgid@example.com');
     const messageId = '<identical-message@relay.test>';
@@ -269,7 +278,7 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — addressing, routing and replay
   });
 
   // ---------------------------------------------------------------- AC-R2 injection
-  it('BLOCKED: subject/body naming another tenant\'s token never changes which file is served', async () => {
+  it("BLOCKED: subject/body naming another tenant's token never changes which file is served", async () => {
     const container = buildTestContainer();
     const victim = await createTenantWithReadyFile(container, 'inj-victim@example.com', {
       originalName: 'secret-payroll.xlsx',
@@ -302,11 +311,7 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — addressing, routing and replay
     expect(
       await deliveries.listForFile(container.pool, victim.tenant.id, victim.file.id),
     ).toHaveLength(0);
-    const rows = await deliveries.listForFile(
-      container.pool,
-      attacker.tenant.id,
-      attacker.file.id,
-    );
+    const rows = await deliveries.listForFile(container.pool, attacker.tenant.id, attacker.file.id);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.file_id).toBe(attacker.file.id);
   });

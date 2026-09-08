@@ -55,7 +55,10 @@ export function buildTestContainer(
   const clock = new FakeClock();
   const fileStore = new FakeFileStore();
   const driveShare = new FakeDriveShare();
-  const inboundMail = new FakeInboundMail(config.MAILGUN_SIGNING_KEY ?? TEST_SIGNING_KEY, clock);
+  const inboundMail = new FakeInboundMail(config.MAILGUN_SIGNING_KEY ?? TEST_SIGNING_KEY, clock, {
+    authservId: config.MAILGUN_AUTHSERV_ID ?? config.INBOUND_DOMAIN,
+    authSource: config.INBOUND_AUTH_SOURCE,
+  });
   const outboundMail = new FakeOutboundMail();
   const blobStaging = new LocalDiskBlobStaging(config.STAGING_DIR);
 

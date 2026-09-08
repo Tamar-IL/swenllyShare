@@ -45,6 +45,16 @@ export const inboundMessages = {
    * webhook delivery hits `ON CONFLICT ... DO NOTHING` and this returns
    * `{duplicate: true}` — no exception, so the caller's enclosing transaction (if any)
    * is never aborted by the conflict the way a raw unique-violation would abort it.
+   *
+   * F-11 (`docs/security/red-team-report.md`, RT-22): `provider_message_id` is ALSO
+   * unique (`inbound_messages_provider_message_id_unique_idx`, migration 0001) — the same
+   * RFC 5322 message re-injected under a fresh Mailgun `signature_token` (two matching
+   * routes, a forwarding/bounce loop, a provider-side re-delivery) must be deduped exactly
+   * like a `signature_token` replay, not treated as a brand-new message. `ON CONFLICT DO
+   * NOTHING` with NO explicit target catches a violation of EITHER unique index — the
+   * previous version named `signature_token` as the only arbiter, so a
+   * `provider_message_id` collision fell through as an uncaught unique-violation
+   * exception instead of the graceful `{duplicate: true}` this method promises.
    */
   async insertOrDuplicate(
     db: Queryable,
@@ -55,7 +65,7 @@ export const inboundMessages = {
          provider_message_id, signature_token, recipient_raw, tenant_id, file_id,
          from_address, from_domain, dmarc, spf, dkim, raw_payload, purge_after
        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-       ON CONFLICT (signature_token) DO NOTHING
+       ON CONFLICT DO NOTHING
        RETURNING *`,
       [
         params.providerMessageId,

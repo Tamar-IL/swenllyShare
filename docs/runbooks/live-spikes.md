@@ -188,6 +188,9 @@ MAILGUN_SIGNING_KEY=...                         # from the Mailgun dashboard, NO
 MAILGUN_SENDING_DOMAIN=mail.yourdomain.com
 OUTBOUND_FROM="Swenlly <no-reply@mail.yourdomain.com>"
 LIVE_MAILGUN_TEST_RECIPIENT=you@somewhere-you-control.example   # see warning below
+# Optional for this spike's first run — leave unset to exercise the INBOUND_DOMAIN
+# fallback default; set once you know the real authserv-id from step 3b's capture.
+MAILGUN_AUTHSERV_ID=...
 ```
 
 **⚠️ `OutboundMailPort`'s real leg actually sends an email.** Set
@@ -209,13 +212,29 @@ LIVE_MAILGUN=1 LIVE_MAILGUN_TEST_RECIPIENT=you@example.com \
 # in the dashboard pointed at your sandboxed domain's Route.
 #   1. Set up a Mailgun Route: match_recipient("^cust-.*@<your-domain>$") -> forward to a
 #      URL you control (e.g. an ngrok tunnel to a local `pnpm dev` instance, or a real
-#      staging deploy's /webhooks/mailgun/inbound).
+#      staging deploy's /webhooks/mailgun/inbound). Leave `INBOUND_REQUESTS_ENABLED=false`
+#      (the F-1 kill switch, default true — set it false here on purpose) pointed at that
+#      deployment until this spike confirms the field-name guess below: with it off, every
+#      signature-verified webhook is quarantined (reason `inbound_disabled`) instead of
+#      being evaluated against a still-unconfirmed DMARC gate, so a live test message can't
+#      accidentally auto-share a file on a wrong guess while you're still capturing payloads.
 #   2. Send a real email to cust-abc123+file-<any26charstoken>@<your-domain> from an
 #      address whose domain has SPF+DKIM+DMARC configured (Gmail/Workspace works).
-#   3. Inspect what actually arrived: log the full raw payload at the webhook route (or
-#      temporarily add a debug log in webhook-mailgun.ts — the frontend/HTTP-layer engineer
-#      owns that file, so coordinate rather than editing it yourself) and find the actual
-#      key(s) carrying the DMARC verdict.
+#   3. Capture the FULL raw payload at the webhook route (temporarily add a debug log in
+#      webhook-mailgun.ts, or read it back from `inbound_messages.raw_payload` — the
+#      pipeline stores it for RAW_PAYLOAD_RETENTION_DAYS regardless of outcome, including
+#      quarantined, so step 1's kill switch doesn't cost you the capture). Look specifically
+#      for:
+#        - a top-level `message-headers` field (Mailgun's documented JSON array of every
+#          MIME header) — does it exist on your plan/route config? If so, does it contain
+#          an `Authentication-Results` entry, and does that entry's authserv-id (the part
+#          before the first `;`) match a real, stable hostname you can put in
+#          MAILGUN_AUTHSERV_ID? Also check whether there is more than one
+#          Authentication-Results entry (a forwarding hop) and confirm the TOPMOST one is
+#          genuinely the one your own receiving MTA added, not a passed-through one.
+#        - failing that, any top-level field that plausibly carries the DMARC/SPF/DKIM
+#          verdict directly (this is the `mailgun-fields` source in mapping.ts) — record
+#          its EXACT name and casing.
 LIVE_MAILGUN=1 pnpm test:integration tests/contract/inbound-mail.test.ts
 ```
 
@@ -224,33 +243,42 @@ both its tests pass, and the email you designated actually arrives with the expe
 body/attachment.
 
 **What counts as pass for 3b:** you have a captured raw payload from a real delivered
-message and can answer, definitively: *which key holds the DMARC result, and what values does
-it take (`pass`/`fail`/`none`/something else entirely)?* The `inbound-mail.test.ts` contract
-suite passing only proves `verify`/`parse` behave consistently with the fake — it does **not**
-prove the DMARC field-name guess in `mapping.ts` is correct, because `parse()` is a pure
-function over whatever payload you hand it. The field-name guess is only actually confirmed
-by inspecting a **real captured payload** against `DMARC_KEY_CANDIDATES` in
-`src/adapters/mailgun/mapping.ts`.
+message and can answer, definitively: *does `message-headers` exist and carry a real
+`Authentication-Results` entry, what authserv-id does it report (for `MAILGUN_AUTHSERV_ID`),
+and what DMARC value format does it use (`pass`/`fail`/`none`/something else entirely)?* The
+`inbound-mail.test.ts` contract suite passing only proves `verify`/`parse` behave consistently
+with the fake — it does **not** prove the auth-results extraction in `mapping.ts` is correct,
+because `parse()` is a pure function over whatever payload you hand it. It is only actually
+confirmed by inspecting a **real captured payload** against
+`src/adapters/mailgun/mapping.ts`'s doc comment (the `(a)`/`(b)` source description) and
+`MAILGUN_AUTHSERV_ID`'s default (falls back to `INBOUND_DOMAIN` in `container.ts` — confirm
+whether the real authserv-id actually matches that, or needs setting explicitly).
 
 **What to record:**
 1. Flip `@unverified-live` → `@verified-live(YYYY-MM-DD)` on `send` once 3a passes and the
    email is confirmed delivered.
 2. `verify`/`parse` are trickier: only mark them verified once you've run `verify` against a
    **real** signature (not the fake's self-signed one) and confirmed `parse` extracts the
-   correct DMARC value from a **real captured payload** — not just that the contract suite's
-   synthetic payload round-trips.
+   correct DMARC value AND the correct evaluated domain (`dmarcDomain`, gate 6's alignment
+   check) from a **real captured payload** — not just that the contract suite's synthetic
+   payload round-trips.
 3. Run `pnpm gen:ledger` and commit `docs/verification-ledger.md`.
-4. **If the real DMARC field name differs from every entry in `DMARC_KEY_CANDIDATES`**, this
-   is the most consequential fix in the whole spike list: update
-   `src/adapters/mailgun/mapping.ts`'s candidate list to the confirmed name (keep the old
-   guesses as lower-priority fallbacks only if there's a real reason to — e.g. different
-   plans/route configs actually vary), re-run, and only then mark verified. Shipping the
-   wrong field name here means the DMARC gate (architecture.md §4.5, pipeline gate 5) is
-   permanently `'unknown'` for every real message and **every legitimate request gets
-   silently quarantined** — this is the single highest-severity unverified assumption in the
-   whole adapter layer.
-5. Append a `docs/lessons.md` entry per CLAUDE.md §7 if the real field name surprised you —
-   this is exactly the kind of fact that should never need re-discovering on the next
+4. **If the real payload's auth-results shape differs from `mapping.ts`'s `(a)`/`(b)`
+   sources** (e.g. `message-headers` doesn't exist on your plan, or the real authserv-id
+   doesn't match `MAILGUN_AUTHSERV_ID`'s `INBOUND_DOMAIN` fallback, or the DMARC verdict
+   lives under a field name `mailgun-fields` doesn't check), this is the most consequential
+   fix in the whole spike list: update `src/adapters/mailgun/mapping.ts` (its extraction
+   functions, not by adding back guessed Title-Case/`X-Mailgun-*` candidate names — see its
+   doc comment for why those were removed) and/or set `MAILGUN_AUTHSERV_ID` explicitly, then
+   re-run, and only then mark verified AND flip `INBOUND_REQUESTS_ENABLED` back to `true` on
+   the deployment(s) this was tested against. Shipping the wrong shape here means the DMARC
+   gate (architecture.md §4.5, pipeline gate 5) is permanently `'unknown'` for every real
+   message and **every legitimate request gets silently quarantined** — this is the single
+   highest-severity unverified assumption in the whole adapter layer, which is exactly why
+   `INBOUND_REQUESTS_ENABLED` exists as a no-deploy-needed way to hold the path shut until
+   this spike is done.
+5. Append a `docs/lessons.md` entry per CLAUDE.md §7 if the real field name/shape surprised
+   you — this is exactly the kind of fact that should never need re-discovering on the next
    project.
 
 ---

@@ -19,12 +19,15 @@ describe.skipIf(!hasTestDatabase())('QA regressions — sender app', () => {
     'BUG (Medium): POST /files/:id/delete for another tenant\'s file falsely "succeeds" ' +
       '(302, same as a real delete) instead of the 404 every other tenant-scoped route in ' +
       'files.ts returns for a cross-tenant id -- src/http/routes/files.ts ~L206-214, the ' +
-      'route ignores FilesService.deleteFile()\'s undefined-means-not-found return value',
+      "route ignores FilesService.deleteFile()'s undefined-means-not-found return value",
     async () => {
       await truncateAll();
       const container = buildTestContainer();
       const app = await buildApp({ container });
-      const { tenant, file } = await createTenantWithReadyFile(container, 'delete-owner@example.com');
+      const { tenant, file } = await createTenantWithReadyFile(
+        container,
+        'delete-owner@example.com',
+      );
       const { cookieHeader: intruderCookie } = await signInAsNewTenant(
         container,
         'delete-intruder@example.com',
@@ -60,7 +63,10 @@ describe.skipIf(!hasTestDatabase())('QA regressions — sender app', () => {
       await truncateAll();
       const container = buildTestContainer();
       const app = await buildApp({ container });
-      const { tenant, file } = await createTenantWithReadyFile(container, 'atomic-owner@example.com');
+      const { tenant, file } = await createTenantWithReadyFile(
+        container,
+        'atomic-owner@example.com',
+      );
       const jar = new CookieJar();
       const { cookieHeader } = await signInAsNewTenant(container, 'atomic-owner@example.com');
       jar.set('swy_sess', cookieHeader.split('=')[1]!);
@@ -161,7 +167,10 @@ describe.skipIf(!hasTestDatabase())('QA regressions — sender app', () => {
       await truncateAll();
       const container = buildTestContainer();
       const app = await buildApp({ container });
-      const { tenant, file } = await createTenantWithReadyFile(container, 'poll-cursor@example.com');
+      const { tenant, file } = await createTenantWithReadyFile(
+        container,
+        'poll-cursor@example.com',
+      );
       const { cookieHeader } = await signInAsNewTenant(container, 'poll-cursor@example.com');
       const jar = new CookieJar();
       jar.set('swy_sess', cookieHeader.split('=')[1]!);

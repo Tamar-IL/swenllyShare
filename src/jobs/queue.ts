@@ -8,6 +8,7 @@ import { handleFileExpire } from './handlers/file-expire.js';
 import { handleDriveRevoke } from './handlers/drive-revoke.js';
 import { handleStagingPurge } from './handlers/staging-purge.js';
 import { handleInboundPurge } from './handlers/inbound-purge.js';
+import { handleExpirySafetySweep } from './handlers/expiry-safety-sweep.js';
 
 export const JOB_KINDS = [
   'file.publish',
@@ -16,8 +17,18 @@ export const JOB_KINDS = [
   'drive.revoke',
   'staging.purge',
   'inbound.purge',
+  'expiry.safety_sweep',
 ] as const;
 export type JobKind = (typeof JOB_KINDS)[number];
+
+/**
+ * F-5's periodic-sweep window: `staging.purge`, `inbound.purge`, and
+ * `expiry.safety_sweep` are enqueued (deduped per window, so this is cheap to call often)
+ * roughly this often. Not a promise that a purge happens exactly on this cadence — the
+ * worker's normal claim/backoff timing still applies to the jobs themselves — only that
+ * one gets INTO the queue this often.
+ */
+export const PERIODIC_SWEEP_INTERVAL_MINUTES = 15;
 
 /** A handler either finishes the job (`done`) or defers it to a specific future time
  * without counting it as a failed attempt (`reschedule` — SharingEngine's paced
@@ -37,6 +48,7 @@ const HANDLERS: Record<JobKind, JobHandler> = {
   'drive.revoke': handleDriveRevoke,
   'staging.purge': handleStagingPurge,
   'inbound.purge': handleInboundPurge,
+  'expiry.safety_sweep': handleExpirySafetySweep,
 };
 
 function backoffMs(attempts: number): number {
@@ -83,7 +95,17 @@ export async function processNextJob(
   container: Container,
   kinds: readonly JobKind[] = JOB_KINDS,
 ): Promise<boolean> {
-  const job = await jobs.claimNext(container.pool, [...kinds]);
+  // F-5: "due" per whichever of (the injected Clock, real wall-clock time) is LATER.
+  // Ordinary jobs default `run_after` to real insert-time `now()` — comparing against
+  // that alone (the original behavior) keeps them claiming exactly as before. A job
+  // scheduled from a FUTURE point on the injected Clock (`files.scheduleExpire` from
+  // `expires_at`) only needs virtual time (`FakeClock.advance()` in tests) to reach it —
+  // it should never depend on real wall-clock time actually elapsing, which a test can't
+  // make happen. `FakeClock` starts pinned near real "now" and only moves on an explicit
+  // `advance()`/`setTo()` call, so in the untouched case it's always <= real `Date.now()`
+  // and this reduces to plain real-time comparison automatically.
+  const dueAsOf = new Date(Math.max(container.ports.clock.now().getTime(), Date.now()));
+  const job = await jobs.claimNext(container.pool, [...kinds], dueAsOf);
   if (!job) return false;
 
   const handler = HANDLERS[job.kind as JobKind];
@@ -117,15 +139,46 @@ export async function processNextJob(
 }
 
 /**
+ * F-5 (RT-53/RT-54): enqueues the periodic sweep kinds (`staging.purge`, `inbound.purge`,
+ * `expiry.safety_sweep`) for the current sweep window, deduped so calling this often is
+ * cheap and never piles up duplicate jobs. This is the ONLY place any production code path
+ * enqueues these kinds — before this fix, nothing did, so the handlers (correct and
+ * unit-proven on their own) never actually ran.
+ */
+export async function ensureSweepsScheduled(container: Container): Promise<void> {
+  const windowMs = PERIODIC_SWEEP_INTERVAL_MINUTES * 60_000;
+  const window = String(Math.floor(container.ports.clock.now().getTime() / windowMs));
+  await jobs.ensureScheduled(container.pool, {
+    kind: 'staging.purge',
+    dedupeKey: `staging.purge:${window}`,
+  });
+  await jobs.ensureScheduled(container.pool, {
+    kind: 'inbound.purge',
+    dedupeKey: `inbound.purge:${window}`,
+  });
+  await jobs.ensureScheduled(container.pool, {
+    kind: 'expiry.safety_sweep',
+    dedupeKey: `expiry.safety_sweep:${window}`,
+  });
+}
+
+/**
  * Drains every currently-claimable job synchronously — the test-only equivalent of
  * letting the worker loop run for a while. Stops as soon as `processNextJob` finds
  * nothing pending; a job a handler reschedules into the future is correctly left
  * unclaimed rather than looping forever.
+ *
+ * Also ensures the periodic sweep kinds are scheduled for the current window before
+ * draining (`ensureSweepsScheduled`) — the real worker loop does the same on its own
+ * timer (`src/jobs/loop.ts`); doing it here too means a test calling `runPendingJobs`
+ * exercises the same "did the sweep actually get scheduled" path production relies on,
+ * rather than only ever exercising sweep jobs it enqueued by hand.
  */
 export async function runPendingJobs(
   container: Container,
   opts: { kinds?: readonly JobKind[]; maxIterations?: number } = {},
 ): Promise<number> {
+  await ensureSweepsScheduled(container);
   const maxIterations = opts.maxIterations ?? 10_000;
   let processed = 0;
   for (let i = 0; i < maxIterations; i++) {
