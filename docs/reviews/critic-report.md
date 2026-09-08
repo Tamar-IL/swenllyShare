@@ -519,3 +519,338 @@ fail closed end to end, at the pipeline and not only in the mapper; (3) can a pe
 `revokeLink` still strand a file silently; (4) does the branded page still render when the embed
 token was derived rather than reported. Each of the three reproductions above should exist as a
 committed regression test before this gate is called passed.
+
+---
+---
+
+# Re-check verdict — 2026-09-08 (after fix pass 5)
+
+**Owner:** critic · **Branch:** `claude/swenlly-system-2-file-sharing-32nrdu` ·
+**HEAD:** `9a46281` · **Method:** ran the re-check protocol above against the *code*, not the
+fix-status notes. `pnpm test` at HEAD: **340 passed, 7 skipped, 60 files, zero failures.**
+Wrote four throwaway probe suites (all deleted; nothing in `src/**` touched, nothing committed).
+
+## Verdict: **FIX-FIRST**
+
+Four of the five ship-blocking/serious findings are genuinely, verifiably closed — I re-ran my
+own reproductions and they no longer reproduce. **F-B is not closed.** The fix narrowed the
+attack surface substantially and, critically, closed the *exposure window* by defaulting the
+kill switch off — but the gate itself is still forgeable, and I now have a bypass that works
+**unconditionally**, including in the case where Mailgun does everything right. It is
+documented as closed in the README, the runbook, ADR 11 and the red-team report.
+
+This is a smaller FIX-FIRST than the last one. Nothing here touches the design. One module
+(`src/adapters/mailgun/mapping.ts` source (b)) and the four documents that describe it.
+
+---
+
+## Per-finding status
+
+### F-A · outbound failure classification — **CLOSED**
+
+My original reproduction no longer reproduces. Re-ran it verbatim:
+
+```
+before (fix pass 4):  attempt 1 = dispatching · attempt 2 = sent (ack_lost) · mails sent = 0
+now   (fix pass 5):   attempt 1 = sending    · attempt 2 = sent            · mails sent = 1
+```
+
+The classification is real, not a moved guess. `AmbiguousSendError extends PortError` (not
+`TransientError`), so `isDefiniteNonSend` cannot accidentally swallow it. Four scenarios,
+verified at the handler level:
+
+| failure | outcome | mail actually sent | retried |
+|---|---|---|---|
+| transient (completed 5xx/429) | `sending` → retry → `sent` | 1 | yes |
+| permanent (completed 4xx) | `failed` (dead-letter hook) | 0 | yes, then dead-lettered |
+| ambiguous (no response) | `unconfirmed` — never `sent` | 0 | no, by design |
+| crash between grant and reply | stays `granted`, reply-only retry; `share_count` stays 1 | 1 | reply only, never re-shares |
+
+The Drive-share `granted` CAS step is the right shape and the `share_count === 1` assertion is
+the correct proof that it never re-shares.
+
+**Two residuals, both minor, both new — flagged, not blocking:**
+
+1. **A bare process crash mid-`dispatching` permanently abandons the delivery.** Probed:
+   `outcome = unconfirmed`, `reason = crash_no_definite_error`, job `done`, zero retries,
+   zero mails. That is *honest* (the whole point of the finding) but it is a dead end: on a
+   single stateful node, an ordinary deploy restart during a delivery silently drops it.
+   `unconfirmed` renders as a pill ("לא מאומת") and is counted nowhere — there is no
+   `/readyz` counter and no resend action anywhere in `src/http/routes/`. The pattern from
+   F-C's fix (record it, count it in `/readyz`, badge it) is exactly what this needs.
+2. **`src/adapters/mailgun/real.ts:159-171` misclassifies one case.** A 2xx response whose
+   body read fails (`res.text().catch(() => '')` swallows it) or whose JSON carries no `id`
+   throws `PermanentError` — i.e. "definite non-send" — for an exchange in which Mailgun
+   **accepted the message**. It is the same "guess in the confident direction" the finding
+   was about, pointed the other way. Cheap fix: `AmbiguousSendError` when the status was 2xx
+   but the body could not be read.
+
+Honest note on the idempotency key: `v:swenlly-delivery` and `h:Message-Id` do **not** make
+Mailgun deduplicate — Mailgun has no such feature on these fields. The fix note says
+"traceable", not "deduped", which is correct; the `errors.ts` doc comment saying a
+`PermanentError` "dead-letters rather than burning through `JOB_MAX_ATTEMPTS`" is not what
+`processNextJob` does (it burns the full budget for every error class). Doc, not code.
+
+---
+
+### F-B · the DMARC gate — **NOT CLOSED.** Reproduced, twice, at the pipeline level
+
+The four "Do this" items were all implemented and three of them are genuine improvements:
+`message-headers`-absent now fails closed **end to end** (my payloads A and B are dead at the
+pipeline, not just the mapper); the unvalidated top-level fallback is gone; the priority is
+flipped; `INBOUND_REQUESTS_ENABLED` defaults `false` with a cross-field production check, a
+drift-detecting `.env.example` test, and a runbook item. That is real work and it closes the
+*window*.
+
+**But the fix rests on a false premise: that `MAILGUN_AUTHSERV_ID` is a secret.** The test
+file says "a genuine, **non-public** value"; the runbook says "never `INBOUND_DOMAIN` — that
+value is public and guessable"; the README says the same. An RFC 8601 authserv-id is the
+*receiving MTA's hostname*. For Mailgun it is `mxa.mailgun.org` / `mxb.mailgun.org` — the
+value published in the MX record for `INBOUND_DOMAIN`, one `dig` away, and the same for every
+Mailgun customer on earth. It is not a secret and cannot be made one.
+
+Test C in `tests/review/dmarc-gate-payloads-a-d.test.ts` and its mapper twin therefore attack
+the wrong string: they forge an `Authentication-Results` naming the **old** `INBOUND_DOMAIN`
+fallback value and assert it is rejected. Of course it is. The attack is to name the
+**configured** value.
+
+**Reproduction C′** (throwaway pipeline test, since deleted). `message-headers` present,
+Mailgun stamps no `Authentication-Results` of its own (exactly the unknown spike 3 exists to
+settle), attacker's own MIME header:
+
+```
+Authentication-Results: mxa.mailgun.test; dmarc=pass header.from=target.test
+From: victim@target.test
+→ {"deliveryId":"PRESENT","outcome":"queued","requester":"victim@target.test"}
+```
+
+**Reproduction C″** — the authserv-id check is a DNS-suffix match
+(`mapping.ts:130-133`, `candidate.endsWith('.' + configured)`), pinned as intended behaviour
+at `tests/unit/mailgun-mapping.test.ts:66`. `evil.mxa.mailgun.test` is accepted:
+
+```
+→ {"deliveryId":"PRESENT","outcome":"queued"}
+```
+
+README and runbook both say the authserv-id must match "**exactly**". The code does not.
+
+**Reproduction F — the one that matters, because it holds even when Mailgun behaves
+perfectly.** Source (a)'s anti-forgery guard discards a synthetic field whenever
+`knownHeaderNames` contains the same key. The attacker controls `knownHeaderNames` — it is
+the list of their own MIME headers. So the attacker can *choose which source answers*: add a
+header literally named `Dmarc:` to knock Mailgun's genuine verdict out, then serve their own
+via source (b).
+
+```
+payload.dmarc = 'fail'            <-- Mailgun's OWN genuine verdict on the forged message
+message-headers:
+  ['Dmarc', 'whatever']           <-- attacker's header; kills source (a) wholesale
+  ['Dmarc-Domain', 'whatever']
+  ['Authentication-Results', 'mxa.mailgun.test; dmarc=pass header.from=target.test']
+
+→ PROBE-F {"deliveryId":"PRESENT","outcome":"queued","requester":"victim@target.test"}
+   control, same payload without the two attacker headers:
+→ PROBE-G {"deliveryId":"absent","outcome":"quarantined","reason":"dmarc_fail"}
+```
+
+The control proves the defense works only while the attacker declines to use it. The dedup
+guard's logic is inverted: a collision means *this verdict cannot be trusted*, and the honest
+response is `unknown` for the whole extraction — not a silent fall-through to the weaker
+source the attacker prefers.
+
+**Impact, unchanged from the original finding and still not inflated.** Not a direct
+exfiltration primitive (AC-R3 still binds delivery to the parsed `From`). The harm is
+outbound abuse: anyone holding a mailto link can make Swenlly email a customer's file, up to
+250 MB, from Swenlly's sending domain, to an address of their choosing, bounded only by
+`RATE_TENANT_PER_HOUR`. For a company whose thesis is "email is the transport that survives
+the filter," that is close to existential. Plus: the allowlist stays bypassable, and
+`deliveries.dmarc = 'pass'` remains a requester assertion rather than a fact.
+
+**Severity now: fatal-on-flip rather than fatal-today.** `INBOUND_REQUESTS_ENABLED=false` is
+the default and production refuses to boot with it true and no authserv-id. Nothing is exposed
+until the founder flips it. But spike 3's brief is "confirm the field name," and both the
+runbook and the README will tell the operator that confirming the field name is what makes it
+safe to flip. It is not.
+
+**Do this (smaller than last time):**
+1. **A `message-headers` entry whose name collides with a Mailgun synthetic field name makes
+   the whole extraction `unknown`** — never a fall-through to source (b). One branch in
+   `extractAuthResult`. This alone kills reproduction F.
+2. **Decide, don't hedge.** `INBOUND_AUTH_SOURCE=both` is what makes reproduction F possible
+   at all. Spike 3 will tell you which source Mailgun actually populates; default to
+   `mailgun-fields` (the only source with any anti-forgery property at all) and make `both`
+   an explicit, documented degradation.
+3. **Drop the DNS-suffix match** or document it accurately. It widens an already-public
+   string. If real-world values are `mxa.<host>`, configure `mxa.<host>`.
+4. **Rewrite tests C (both copies) to forge the configured authserv-id, not the old
+   fallback**, and add reproduction F as a pinned test. The current tests prove that a
+   *badly configured* deployment is protected, which is not the claim being made.
+5. **Correct the four documents again** — this time to: *"the inbound DMARC verdict is not
+   forgery-proof; it is held shut by `INBOUND_REQUESTS_ENABLED=false` and must not be flipped
+   until source (b) is either removed or given a discriminator Mailgun actually provides."*
+
+---
+
+### F-C · silent expiry stranding — **CLOSED**
+
+My reproduction no longer reproduces. Re-ran it further than the committed regression test
+does — six full sweep windows with `revokeLink` throwing `PermanentError` every time:
+
+```
+round 0..5: status=expired · expiry_error=set · /readyz.strandedExpiries=1 · job=dead
+            revokeAttempts = 2,4,6,8,10,12   <-- it keeps retrying, every window, forever
+after the underlying failure is fixed:
+            status=expired · expiry_error=null · strandedExpiries=0   <-- self-heals
+```
+
+All three items done, and done well. The ordering change — flip `status` and enqueue every
+`drive.revoke` **first**, unconditionally, then let the unverified Zoho call throw — is the
+right architectural instinct: it makes the parts that *can* be guaranteed independent of the
+part that cannot. The steady state is a job that flaps `dead → pending → dead` once per sweep
+window while staying visibly counted, which is exactly right. The residual is inherent, not a
+defect: on the flag-OFF path the raw Zoho link genuinely stays live while `revokeLink` fails.
+The system now says so out loud instead of lying.
+
+### F-D · the confirm step — **CLOSED as governance, open as a fork (correct)**
+
+The governance half is what I asked for and it is done: ADR 6 carries an amendment, README's
+open-questions section carries the decision with both options and the reasoning, and the
+orchestrator raised it rather than resolving it by omission. The added reasoning — a
+click-to-confirm link is unopenable by this product's audiences, so reply-to-confirm is the
+only buildable variant — is a genuinely better framing than mine was; I named the control,
+not the form it would have to take here.
+
+The engineering half stays open, and F-B's non-closure sharpens it: reply-to-confirm is the
+one control that does not depend on Mailgun's field naming at all. If the founder wants the
+inbound path live before spike 3 resolves cleanly, this is the way.
+
+### F-E · derived embed token — **CLOSED**
+
+`extractEmbedToken` has no derive path; it returns `null` when no `embed_url`/`embed_link` is
+present. `FileStorePort.createPublicLink` types it `string | null`. `GET /s/:slug` renders the
+page without an iframe rather than falling back
+(`src/http/routes/public-share.ts:31-40`). The regression test forces the null path through a
+real publish and asserts no ≥12-character substring of the raw link's path appears in body or
+headers — stronger than the whole-string check I asked for. Spike 1's headline output is now
+the right question. Nothing left here.
+
+### F-F · four documents overstate F-1 — **PARTIALLY CLOSED; the residual is F-B's**
+
+The *form* is fixed and the fix is good: all four now state a property with its precondition
+rather than describing the change. The problem is that the property they state is still not
+true. README: *"never the flat namespace attacker-controlled MIME headers also occupy"* —
+source (b) reads `message-headers`, which is precisely the array of attacker-controlled MIME
+headers; the only discriminator is a public hostname. README and runbook: *"matches
+`MAILGUN_AUTHSERV_ID` **exactly**"* — the code also accepts any DNS suffix (C″). Runbook 4a:
+"never set it to `INBOUND_DOMAIN`… that value is public" — implies the correct value is not.
+
+The instruction was "then make that sentence true." The sentence was written; F-B did not make
+it true. Closes when F-B does.
+
+### F-G · `MAX_UPLOAD_BYTES` — **CLOSED, and improved on**
+
+Default is 262,144,000. Beyond what I asked: `ZohoFileStore.upload` throws a `PermanentError`
+with no request attempted unless `ZOHO_LARGE_UPLOAD_ENABLED=true` (default `false`), so a
+stale `MAX_UPLOAD_BYTES` can no longer route a real file into invented code. That is the right
+generalisation of the finding — defend the invariant at the boundary that owns it, not only at
+the config that happens to gate it today.
+
+### F-H · runbook item 4 — **CLOSED**
+
+Item 4 now states plainly that it governs outbound deliverability and has no effect on the
+inbound gate, keeps the correction visible rather than editing history, and points at the new
+item 4a. Item 4a is the checklist entry the product needed.
+
+### Minor items — as reported
+
+`.env.example` gap and the `fromDomain` `split('@')[1]` bug are fixed (verified:
+`request-pipeline.ts:73` uses `addressDomain()`). README's test count is current (340). The
+five deferred items are still open and were honestly declared as deferred, which is the
+correct handling. `console.log` survives at `src/jobs/handlers/file-expire.ts:48` and
+`src/jobs/queue.ts:81`.
+
+---
+
+## New findings from this pass
+
+- **N-1 (serious).** The dedup guard in `extractFromMailgunFields` is attacker-triggerable and
+  fails *open* into the weaker source rather than closed. Reproduction F above. This is the
+  same lesson as `docs/lessons.md`'s "a guard whose input is optional must fail closed,"
+  one level up: *a guard whose input the attacker can poison must fail closed too.*
+- **N-2 (serious).** `unconfirmed` is a terminal dead end with no counter, no alarm and no
+  resend affordance — a routine deploy restart mid-delivery silently drops a file delivery.
+  F-C's fix has the pattern to copy.
+- **N-3 (minor).** `src/adapters/mailgun/real.ts` classifies a 2xx-with-unreadable-body as
+  `PermanentError` (definite non-send) for an exchange Mailgun accepted.
+- **N-4 (minor).** The authserv-id DNS-suffix match is undocumented in the two places that
+  describe it as exact, and pinned as intended at `mailgun-mapping.test.ts:66`.
+
+## Updated per-AC verdict
+
+| AC | Previous | Now | Note |
+|---|---|---|---|
+| **AC-U1** three artifacts | MET | **MET** | unchanged |
+| **AC-U2** flag OFF → raw Zoho link | MET w/ caveat | **MET with caveat** | unchanged: spike-1 hypotheses |
+| **AC-U3** flag ON → branded page | MET w/ caveat (serious) | **MET with caveat (minor)** | F-E closed; the derive path is gone and the null case refuses to render. Residual is spike 4 only. |
+| **AC-U4** expiry enforced | **NOT MET** | **MET with caveat** | F-C closed and re-proved over six sweep windows. Caveat is inherent, not a defect: on the flag-OFF path the raw link stays live while an unverified `revokeLink` fails — now expired in-product, retried every window, counted in `/readyz`, badged. |
+| **AC-R1** DMARC-fail/absent → no delivery | **NOT MET** | **NOT MET** | Improved (A, B dead end to end; window closed by default) but reproductions C′, C″ and F stand. F is unconditional. |
+| **AC-R2** file chosen only from the token | MET | **MET** | unchanged; still the strongest surface here |
+| **AC-R3** delivery to the verified From only | MET w/ caveat | **MET with caveat** | structurally airtight; "verified" still inherits AC-R1 |
+| **AC-R4** ≤20 MB attach / larger Drive share | MET w/ caveat | **MET with caveat (reduced)** | F-G closed: nothing routes into invented code without an explicit opt-in. Google account-type fork still open (PRD §10.4). |
+| **AC-R5** custom message + display name | MET | **MET** | unchanged |
+| **AC-R6** signature required | MET | **MET** | unchanged |
+| **AC-E1** auto-duplicate at the cap | MET w/ caveat | **MET with caveat** | unchanged; spike 2 is still the highest-value fact |
+| **AC-E2** idempotent, serialized per (tenant, file) | MET | **MET** | unchanged; still the best code here |
+| **AC-A1** file-scoped access only | MET | **MET** | unchanged |
+| **AC-A2** every delivery audit-logged | MET w/ caveat (serious) | **MET with caveat (minor)** | F-A closed: the log no longer claims `sent` for a delivery that did not happen, and `unconfirmed` is an honest third state. Remaining holes are the quarantine cap (deferred minor) and N-2. |
+| **AC-A3** tenant isolation | MET | **MET** | unchanged |
+
+## What is still genuinely strong
+
+Everything in the original list survived the fix pass intact — I re-checked the
+`SharingEngine` proof, the `@unverified-live` ledger and the tenant-isolation lint blocks, and
+none of them were eroded. Add to it: **the F-C fix is the best work in this pass** — flipping
+the guaranteed-local work ahead of the unverifiable external call, then making the failure
+counted, badged, retried and self-healing, is a pattern worth reusing everywhere this codebase
+calls a provider it has never talked to. And the `docs/lessons.md` entry recording a race the
+fix pass introduced *and caught itself* is the loop working as designed.
+
+## What must be said to the founder plainly
+
+The last report said five things. Four of them are now fixed and I checked each by re-running
+my own break-it tests rather than reading the notes: a flaky mail provider no longer loses a
+file while telling you it was delivered; expiry can no longer fail silently — it now expires
+the file immediately, keeps retrying the revoke every fifteen minutes forever, shows you a
+badge, and heals itself when the underlying problem is fixed; the branded page can no longer
+leak the raw Zoho link; and large files no longer get routed into unverified code. The
+confirm-step question is now properly on your desk as a decision instead of being quietly
+resolved by an architect, and the reframing is better than mine was.
+
+One is not fixed, and it is the same one as last time. The email-request gate — the thing that
+decides "is this person really who they say they are" — is still forgeable. The fix assumed
+that a certain configuration value is a secret. It isn't: it's the name of Mailgun's mail
+server, published in your own DNS, identical for every Mailgun customer. I also found a
+sharper version of the attack that works even if Mailgun does everything correctly: the
+attacker adds one junk header to their own email, which switches off the good check, and then
+supplies their own answer through the weaker one. I reproduced both. The good news, and it's
+real: the switch that turns this whole path on now defaults to **off**, and the server refuses
+to start in production if you turn it on without the required configuration. So nothing is
+exposed today. The danger is the instruction sheet — the runbook and the README will tell you
+that once the live spike confirms a field name, it's safe to flip on. It is not. Do not flip
+`INBOUND_REQUESTS_ENABLED=true` until either the weaker source is removed, or you've decided
+to add the reply-to-confirm step (the F-D fork) — which happens to be the one control that
+doesn't depend on any of this.
+
+Two smaller things worth a sentence. If the server restarts in the middle of sending a file,
+that one delivery is now honestly marked "unverified" instead of falsely marked "sent" — which
+is the right fix — but it is then abandoned, with nothing to alert you and no way to resend.
+And the "how many tests pass" number, the ledger of what's been verified against real
+providers, and the honesty of the fix notes all held up under a second adversarial read. Zero
+live calls still means zero live calls.
+
+## Re-check protocol (next pass)
+
+Short. Re-run reproductions C′, C″ and F at the pipeline level; confirm a Mailgun-synthetic-
+field-name collision in `message-headers` yields `unknown` for the *whole* extraction; confirm
+the two rewritten C tests forge the *configured* authserv-id; confirm the four documents state
+the gate's real, current guarantee. Then this is SHIP-READY-FOR-LIVE-SPIKES.
