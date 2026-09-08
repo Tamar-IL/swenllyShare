@@ -220,6 +220,75 @@ describe('mapMailgunInboundPayload — Authentication-Results / message-headers'
    * quarantine as `unknown`; D — the one payload where the defense already held — must
    * still resolve `fail`, not regress to `unknown`.
    */
+  describe('fix pass 6b (critic N-5/N-6): RFC 8601 forms and the domain cross-check', () => {
+    const OURS = 'mxa.swenlly-mail.example';
+    const AR_CONFIG: MailgunMappingConfig = {
+      authservId: OURS,
+      authSource: 'authentication-results',
+    };
+    const base = {
+      recipient: 'cust-abc123+file-def456@share.swenlly.test',
+      From: 'attacker@evil.test',
+      token: 'tok-1',
+    };
+
+    it.each([
+      `${OURS} 1; dmarc=fail header.from=evil.test`,
+      `${OURS} (mailgun receiver); dmarc=fail header.from=evil.test`,
+      `(pre) ${OURS} 1 (post); dmarc=fail header.from=evil.test`,
+      `"${OURS}"; dmarc=fail header.from=evil.test`,
+    ])('N-5: a genuine stamp in RFC 8601 form %j is recognized as ours', (genuine) => {
+      const single = {
+        ...base,
+        'message-headers': JSON.stringify([['Authentication-Results', genuine]]),
+      };
+      expect(mapMailgunInboundPayload(single, AR_CONFIG).dmarc).toBe('fail');
+      // ...so an attacker's plain-form forgery next to it is a SECOND entry naming ours:
+      // ambiguous, never the "unique match".
+      const forged = {
+        ...base,
+        'message-headers': JSON.stringify([
+          ['Authentication-Results', genuine],
+          ['Authentication-Results', `${OURS}; dmarc=pass header.from=evil.test`],
+        ]),
+      };
+      expect(mapMailgunInboundPayload(forged, AR_CONFIG).dmarc).toBe('unknown');
+    });
+
+    it('N-6: the two sources agreeing on dmarc=pass but disagreeing on the evaluated domain -> unknown, in both modes', () => {
+      const payload = {
+        ...base,
+        dmarc: 'pass',
+        'dmarc-domain': 'corp.test',
+        'message-headers': JSON.stringify([
+          ['From', 'attacker@evil.test'],
+          ['Authentication-Results', `${OURS}; dmarc=pass header.from=evil.test`],
+        ]),
+      };
+      for (const authSource of ['mailgun-fields', 'authentication-results'] as const) {
+        const parsed = mapMailgunInboundPayload(payload, { authservId: OURS, authSource });
+        expect(parsed.dmarc).toBe('unknown');
+        expect(parsed.dmarcDomain).toBeNull();
+      }
+    });
+
+    it('N-6: the other source naming a domain while the authoritative one has none -> unknown', () => {
+      const payload = {
+        ...base,
+        dmarc: 'pass',
+        'message-headers': JSON.stringify([
+          ['From', 'attacker@evil.test'],
+          ['Authentication-Results', `${OURS}; dmarc=pass header.from=evil.test`],
+        ]),
+      };
+      const parsed = mapMailgunInboundPayload(payload, {
+        authservId: OURS,
+        authSource: 'mailgun-fields',
+      });
+      expect(parsed.dmarc).toBe('unknown');
+    });
+  });
+
   describe('fix pass 5, F-B: the critic four probe payloads (A-D)', () => {
     const REAL_AUTHSERV_ID = 'mxa.swenlly-mail.example';
     const PROBE_CONFIG: MailgunMappingConfig = {

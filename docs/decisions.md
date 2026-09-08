@@ -127,6 +127,16 @@ exact value the critic's forged payloads exploited). `INBOUND_REQUESTS_ENABLED` 
 `false` (was `true`) — a kill switch built for an unverified assumption must default to the safe
 position.
 
+**Fix pass 6 / 6b (critic second re-check):** the authserv-id is Mailgun's public hostname, and
+"try one source, fall back to the other" let an attacker choose which source answers. Now
+`INBOUND_AUTH_SOURCE` names exactly ONE source (`mailgun-fields` default, or
+`authentication-results`); each source is classified absent / ambiguous / present before use
+(a synthetic-field name colliding with a MIME header, or two `Authentication-Results` naming
+our authserv-id in any order, is ambiguous; authserv-id parsed per RFC 8601 incl. version token
+and comments, matched by exact equality only); ambiguity in either source, or disagreement on
+the verdict OR the evaluated domain, yields `unknown`. Residual: `authentication-results` mode
+is safe only if Mailgun stamps its own header on every message — spike 3c tests exactly that.
+
 ### 12. F-2 — DMARC alignment fails closed on a domain-less `pass` (orchestrator decision)
 **Context:** gate 6's alignment check silently no-ops when the evaluated domain can't be read,
 even though `dmarc` itself fails closed on the identical uncertainty — and two existing test pins

@@ -188,5 +188,55 @@ describe.skipIf(!hasTestDatabase())(
         expect(rows[0]?.reason).toBe('dmarc_unknown');
       }
     });
+
+    it("N-5 (fix pass 6b): Mailgun's genuine stamp carries an RFC 8601 version token; the attacker's plain forgery beside it -> ambiguous, quarantined dmarc_unknown (authentication-results mode)", async () => {
+      const container = buildTestContainer({ INBOUND_AUTH_SOURCE: 'authentication-results' });
+      const { tenant, file } = await createTenantWithReadyFile(container, 'probe-n5@example.com');
+      const payload = buildSignedWebhookPayload(container, {
+        requestToken: file.request_token,
+        tenantSlug: tenant.slug,
+        fromAddress: 'attacker@evil.test',
+        includeMessageHeaders: false,
+      });
+      const ours = container.config.MAILGUN_AUTHSERV_ID;
+      payload['message-headers'] = JSON.stringify([
+        ['From', payload.From],
+        ['Authentication-Results', `${ours} 1; dmarc=fail header.from=evil.test`],
+        ['Authentication-Results', `${ours}; dmarc=pass header.from=evil.test`],
+      ]);
+      const outcome = await container.services.requestPipeline.handleWebhook(payload);
+      expect(outcome.deliveryId).toBeUndefined();
+      const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
+      expect(rows[0]?.outcome).toBe('quarantined');
+      expect(rows[0]?.reason).toBe('dmarc_unknown');
+    });
+
+    it('N-6 (fix pass 6b): sources agree on pass but the forged header.from names the attacker domain -> quarantined dmarc_unknown, both modes', async () => {
+      for (const INBOUND_AUTH_SOURCE of ['mailgun-fields', 'authentication-results'] as const) {
+        await truncateAll();
+        const container = buildTestContainer({ INBOUND_AUTH_SOURCE });
+        const { tenant, file } = await createTenantWithReadyFile(container, 'probe-n6@example.com');
+        const payload = buildSignedWebhookPayload(container, {
+          requestToken: file.request_token,
+          tenantSlug: tenant.slug,
+          fromAddress: 'attacker@evil.test',
+          dmarc: 'pass',
+          dmarcDomain: 'corp.test', // Mailgun's genuine evaluated domain != From domain
+          includeMessageHeaders: false,
+        });
+        payload['message-headers'] = JSON.stringify([
+          ['From', payload.From],
+          [
+            'Authentication-Results',
+            `${container.config.MAILGUN_AUTHSERV_ID}; dmarc=pass header.from=evil.test`,
+          ],
+        ]);
+        const outcome = await container.services.requestPipeline.handleWebhook(payload);
+        expect(outcome.deliveryId).toBeUndefined();
+        const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
+        expect(rows[0]?.outcome).toBe('quarantined');
+        expect(rows[0]?.reason).toBe('dmarc_unknown');
+      }
+    });
   },
 );

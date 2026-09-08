@@ -891,3 +891,259 @@ is not built (the requester can simply send the request again; each request is a
 **N-3 / N-4** — not addressed in this pass; carried in the Minor list.
 
 Suite after fix pass 6: 348 passed, 7 live-gated skips, zero `it.fails`.
+
+---
+
+## Second re-check verdict (critic, 2026-09-08) — after fix pass 6
+
+**Method.** I did not read the fix-pass-6 status note as evidence. I re-ran C′, C″ and F at the
+pipeline level in **both** `INBOUND_AUTH_SOURCE` modes, plus nine new mapper probes and seven new
+pipeline probes of my own, against HEAD (`ad689c2`). Full suite re-run: **348 passed, 7 skipped,
+60 files, zero failures.** All probes deleted; `src/**` untouched; nothing committed.
+
+### Verdict: **FIX-FIRST** — but a far narrower one than the last two passes
+
+Concretely: **the live spikes can start today.** Spikes 1, 2, 3a, 3b, 4 and the *capture* half of
+3c expose nothing — `INBOUND_REQUESTS_ENABLED=false` is the default and production refuses to boot
+otherwise. What must be fixed first is the *decision* the spikes feed: two new fail-opens in
+`INBOUND_AUTH_SOURCE=authentication-results` (≈3 lines of code between them), and two of the four
+documents that still describe a design fix pass 6 deleted.
+
+---
+
+### F-B — **CLOSED in the default mode. NOT closed in `authentication-results` mode.**
+
+`src/adapters/mailgun/mapping.ts` is materially better work than the last two attempts. Verified
+against the code, not the note:
+
+- **No fallback path exists.** `combine()` (`:210-217`) returns `EMPTY_AUTH` the moment the
+  authoritative source is not `present`. There is no second door. N-1 is genuinely closed.
+- **Exact-match is the only authserv-id rule.** `authservIdMatches` (`:131-133`) is a single
+  `===` after trim+lowercase. The `endsWith` suffix rule is gone, and the test that *pinned* it
+  as intended behaviour (`tests/unit/mailgun-mapping.test.ts:66`) now asserts the opposite. N-4
+  closed.
+- **A synthetic-field-name collision yields `unknown` for the whole extraction**, not just for
+  `dmarc`. Confirmed with a collision on a *non-dmarc* name, which is the stricter test:
+
+```
+payload: dmarc=pass spf=pass dkim=pass dmarc-domain=evil.test
+message-headers: [['From',…],['Spf','whatever']]        <-- collides on `spf`, not `dmarc`
+→ {"dmarc":"unknown","spf":null,"dkim":null,"dmarcDomain":null}
+same with ['Dmarc-Domain','w']                          → identical
+```
+
+- **The rewritten tests forge the configured authserv-id.** C′, C″ and F in
+  `tests/review/dmarc-gate-payloads-a-d.test.ts` all use `container.config.MAILGUN_AUTHSERV_ID`.
+  (Legacy A–D keep the old `INBOUND_DOMAIN` string, which is correct — they are the *old* probes,
+  retained as history, and C′ is the replacement.)
+
+**Pipeline results, both modes, my own probes:**
+
+| probe | `mailgun-fields` (default) | `authentication-results` |
+|---|---|---|
+| C′ forged single A-R, configured id | quarantined `dmarc_unknown` | **queued** — declared residual |
+| C″ `evil.<id>` DNS suffix | quarantined `dmarc_unknown` | quarantined `dmarc_unknown` |
+| F attacker adds `Dmarc:` MIME header | quarantined `dmarc_unknown` | quarantined `dmarc_unknown` |
+| **N-5** genuine stamp `<id> 1;` + forged clean | quarantined `dmarc_unknown` | **queued, `dmarc=pass`** |
+| **N-5b** genuine stamp `<id> (Mailgun);` + forged | quarantined `dmarc_unknown` | **queued, `dmarc=pass`** |
+| **N-6** genuine `dmarc-domain` ≠ forged `header.from` | quarantined `dmarc_domain_mismatch` | **queued, `dmarc=pass`** |
+| control, fully genuine | queued (correct) | queued (correct) |
+
+In the **default configuration this gate is now sound against every payload shape I could
+construct.** That is a real close and it took three passes to get here.
+
+---
+
+### New — **N-5 (serious; fatal-on-flip).** The authserv-id parser is not RFC 8601, and it breaks the one property spike 3c can prove
+
+`parseAuthenticationResultsValue` (`:105-127`) takes everything before the first `;` as the
+authserv-id. RFC 8601's grammar is `authserv-id [ CFWS authres-version ]` — a legal genuine
+header may be `mxa.mailgun.org 1; dmarc=fail …` or `mxa.mailgun.org (Mailgun Inc); dmarc=fail …`.
+Both parse to an authserv-id that does not `===` the configured value, so **Mailgun's genuine
+verdict is silently discarded and the attacker's clean forgery becomes the unique match**:
+
+```
+message-headers:
+  ['Authentication-Results', 'mxa.mailgun.test 1; dmarc=fail header.from=evil.test']  <-- genuine
+  ['Authentication-Results', 'mxa.mailgun.test; dmarc=pass header.from=evil.test']    <-- forged
+→ PIPE [authentication-results] {"deliveryId":"PRESENT","outcome":"queued","dmarc":"pass"}
+   (comment form gives the identical result)
+```
+
+This is not the documented residual. The mapper doc comment (`:45-52`) says the residual is
+"Mailgun does NOT stamp its own header." Here Mailgun **does** stamp, **does** say `dmarc=fail`,
+and the forgery still wins. Worse, it invalidates the safety argument the doc comment and the
+runbook both rest on: *"including one that already carries a forged copy (then there are two, and
+rule 3 quarantines)."* There are two in the payload; the code counts one.
+
+Spike 3c's pass criterion is written as a single sentence — *"`message-headers` shows TWO entries
+naming the authserv-id **and** the pipeline quarantines"* — which an operator will read as an
+observation with a consequence, not as two independent checks. If Mailgun's real stamp carries a
+version or a comment, the operator sees two entries, ticks the box, and enables a forgeable mode.
+
+**Do this:** (1) parse the authserv-id per RFC 8601 — strip a trailing version token and any
+CFWS comment before comparing; (2) make spike 3c's pass criterion the **pipeline outcome**, as a
+standalone hard stop ("if the request was delivered rather than quarantined, STOP — do not enable
+this mode"); (3) pin N-5's two payloads as regression tests.
+
+### New — **N-6 (serious; same mode).** `combine` cross-checks the verdict but never the evaluated domain
+
+`combine` (`:213`) compares `other.auth.dmarc !== authoritative.auth.dmarc` only. `dmarcDomain` —
+the value gate 6 uses as the anti-spoofing binding — is taken from the authoritative source
+verbatim and never compared against the other source, even when the other source has it:
+
+```
+payload: dmarc=pass  dmarc-domain=good.test          <-- Mailgun's genuine evaluated domain
+message-headers: ['Authentication-Results', '<id>; dmarc=pass header.from=evil.test']
+→ [authentication-results] queued, dmarc=pass, aligned against evil.test
+→ [mailgun-fields]         quarantined `dmarc_domain_mismatch`   <-- correct behaviour, one mode away
+```
+
+The `mailgun-fields` column shows the system already knows how to catch this. The fix is one line
+of symmetry: treat a `dmarcDomain` disagreement exactly as a `dmarc` disagreement. That also
+narrows N-5 — with the domain cross-checked, N-5's attack fails whenever Mailgun populates its
+synthetic fields at all.
+
+### New — **N-7 (serious, documentation).** Two of the four documents still describe the design fix pass 6 deleted
+
+The re-check item was "confirm the four documents state the gate's real current guarantee."
+**Two of four do; two do not**, and it is the same two as last pass.
+
+- `README.md:113-120` — *"DMARC/SPF/DKIM come from Mailgun's own synthetic fields **or** a
+  `message-headers` `Authentication-Results` entry"*. That `or` is precisely the two-source model
+  fix pass 6 removed. Cites "(fix pass 5, F-B)" as current. No mention of `INBOUND_AUTH_SOURCE`
+  in the security-model section, and **no mention of the residual at all**. `README.md:18` still
+  claims "340 tests pass" (348).
+- `docs/decisions.md` ADR 11 — `grep -c 'fix pass 6\|INBOUND_AUTH_SOURCE' docs/decisions.md` is
+  **0**. ADR 11 ends at the fix-pass-5 correction and still states the `or` model. There is no ADR
+  anywhere recording what is genuinely the most consequential architectural decision of this pass:
+  *one operator-chosen source, no fallback, ambiguity fails closed.* That decision exists only in
+  a code comment and a critic report.
+- `docs/progress.md:34-36` — accurate and current. ✅
+- `docs/security/red-team-report.md` §6 F-1 — accurate, current, **and states the residual
+  explicitly.** The best of the four. ✅
+
+`docs/runbooks/run-and-deploy.md` item 4a is also good and honest: it says outright that the
+authserv-id is Mailgun's PUBLIC hostname, that exactly one mode must be chosen from what spike 3
+shows, and that neither signal means keep the path closed. That is the correction I asked for.
+
+**Would the runbook stop an operator from flipping the switch unsafely?** For `mailgun-fields`:
+yes. For `authentication-results`: **no** — because of N-5 its central test can pass while the
+gate is open, and because of N-7 the two documents an operator is most likely to read first still
+describe a gate that no longer exists.
+
+### N-8 (minor) — stale text inside the safety documents themselves
+
+- `docs/runbooks/live-spikes.md:204-206`: *"leave unset to exercise the `INBOUND_DOMAIN` fallback
+  default"* — that fallback was deleted (it is now `mailgun.org`), and the same file contradicts
+  itself 60 lines later with *"required, never defaulted — `container.ts` no longer falls back to
+  `INBOUND_DOMAIN`."*
+- Same file, spike 3b: *"the F-1 kill switch, **default true**"* — it defaults `false`.
+- `src/config.ts:153-155`: *"`container.ts` falls back to `INBOUND_DOMAIN` when this is unset"* —
+  it no longer does (`container.ts:190`).
+- `.env.example:70-73` and `config.ts:206` still frame the authserv-id as needing to be
+  non-public. Runbook 4a corrected this premise; these two did not get the memo.
+- `docs/runbooks/run-and-deploy.md:96-97` describes `/readyz` as `{ok, db, pendingJobs}` — it now
+  also returns `sweeps`, `strandedExpiries`, `unconfirmedDeliveries`.
+- `tests/setup/container.ts:69` retains `?? config.INBOUND_DOMAIN`, the fallback production
+  deleted. Harmless today (the test config always sets it), but it is the deleted bug living on
+  in the harness.
+
+### N-1 — **CLOSED.** N-2 — **CLOSED as far as it goes (downgraded to minor)**
+
+N-1: verified structurally, not by note — `combine` has no fall-through and neither source is
+consulted when the other is authoritative and absent.
+
+N-2: `/readyz` now returns `unconfirmedDeliveries` and logs at `warn` when non-zero
+(`src/http/routes/health.ts:22-25`); the row renders as "לא מאומת" with the red quarantine pill
+(`src/lib/presentation.ts:64`). `ok` correctly stays `true` — this is an operator signal, not a
+readiness failure. No resend action was built; the stated rationale (the requester simply asks
+again, and each request is a new delivery) holds on this product's only delivery path. Accepted
+as minor. Honest declaration, real surface, proportionate scope.
+
+### N-3 (minor) — still open, honestly carried: a 2xx exchange with an unreadable body is classified `PermanentError`.
+
+---
+
+### Final per-AC verdict
+
+| AC | Last pass | Now | Note |
+|---|---|---|---|
+| **AC-U1** three artifacts | MET | **MET** | unchanged |
+| **AC-U2** flag OFF → raw Zoho link | MET w/ caveat | **MET with caveat** | unchanged; spike-1 hypotheses |
+| **AC-U3** flag ON → branded page | MET w/ caveat (minor) | **MET with caveat (minor)** | unchanged; residual is spike 4 |
+| **AC-U4** expiry enforced | MET w/ caveat | **MET with caveat** | unchanged; F-C stayed closed under re-probe |
+| **AC-R1** DMARC-fail/absent → no delivery | **NOT MET** | **MET in the default config; NOT MET under `INBOUND_AUTH_SOURCE=authentication-results`** | C′/C″/F/N-5/N-6 all quarantine in `mailgun-fields`. The alternative mode fails C′ (declared), N-5 and N-6 (not declared). Requires an explicit operator flip; kill switch defaults off. |
+| **AC-R2** file chosen only from the token | MET | **MET** | unchanged; still the strongest surface |
+| **AC-R3** delivery to the verified From only | MET w/ caveat | **MET with caveat** | structurally airtight; "verified" inherits AC-R1, incl. N-6's domain gap |
+| **AC-R4** ≤20 MB attach / larger Drive share | MET w/ caveat | **MET with caveat** | unchanged; Google account-type fork open |
+| **AC-R5** custom message + display name | MET | **MET** | unchanged |
+| **AC-R6** signature required | MET | **MET** | unchanged |
+| **AC-E1** auto-duplicate at the cap | MET w/ caveat | **MET with caveat** | unchanged; spike 2 |
+| **AC-E2** idempotent, serialized per (tenant, file) | MET | **MET** | unchanged; still the best code here |
+| **AC-A1** file-scoped access only | MET | **MET** | unchanged |
+| **AC-A2** every delivery audit-logged | MET w/ caveat (minor) | **MET with caveat (minor)** | N-2 now counted, logged and badged; no resend action |
+| **AC-A3** tenant isolation | MET | **MET** | unchanged |
+
+### What is genuinely good in this pass
+
+The mapper rewrite is the right shape and I could not break it in the default mode. Three things
+in particular: classifying each source as **absent / ambiguous / present** *before* using it —
+that vocabulary is what made the collision bug expressible at all; deleting `both` rather than
+hardening it, which removed the attacker's ability to choose the door; and making the collision
+rule poison the **whole** extraction rather than the one colliding field, which I checked with a
+non-`dmarc` collision specifically because that is where a partial fix would have shown. Spike 3c
+is a better test than the one I asked for — it tells the operator to send a *pre-forged* message,
+which is real adversarial thinking applied to a runbook. And `red-team-report.md` §6 F-1 is the
+model the other three documents should copy: it states the property, its precondition, **and the
+residual**, in that order.
+
+### Plain language, for the founder
+
+The email gate is now genuinely closed in the setting the product ships with. I attacked it
+sixteen different ways this time, including the two attacks that beat it last round, and in the
+default setting every single one was blocked and the honest message still got through. That is
+real progress and it is the first time I can say it.
+
+There is a second, optional setting the code offers, and it is the one I would not let you turn
+on. It trusts a stamp that the receiving mail server writes onto the message. The problem is that
+the code recognises that stamp only when it is written in one exact spelling — and the official
+standard permits two other perfectly normal spellings. If Mailgun uses either of them, the code
+throws away Mailgun's real answer and accepts the attacker's fake one instead. I reproduced that:
+Mailgun says "this message is forged", the attacker says "it's fine", and the attacker wins. The
+instruction sheet for the live test can't catch this, because its check is "did you see two
+stamps in the data" — and you *will* see two; the code just isn't counting one of them. Both
+fixes are small: teach the parser the standard's real spelling rules, and also compare the sender
+domain the two sources report, not just their yes/no verdict — the code already does the second
+one correctly in the other mode, one file away.
+
+The last thing is bookkeeping, and I'm flagging it because it's now the third time: the README and
+the decisions log still describe the *old* design — the one this fix pass deliberately deleted.
+Anyone reading them, including you in six months, would believe the gate works differently from
+how it does. The progress log and the security report are both correct and current; the security
+report is the best-written of the four and the other two should be brought in line with it.
+
+**So: start the live spikes now — capturing real Mailgun payloads is safe today and it is the
+single highest-value thing left.** Then make the three small fixes above before you choose a mode
+or turn the inbound path on. Nothing here is architectural; it is one parser, one comparison, and
+two paragraphs of documentation.
+
+
+---
+
+## Fix pass 6b status (orchestrator, 2026-09-08) — response to the second re-check
+
+- **N-5 — fixed.** `parseAuthenticationResultsValue` now parses per RFC 8601: comments stripped,
+  the authserv-id is the first token before `;` (quoted or bare), the optional version token is
+  ignored. A genuine `mxa.host 1; dmarc=fail` or `mxa.host (comment); …` is recognized as ours,
+  so a plain-form forgery beside it makes TWO entries ⇒ ambiguous ⇒ `dmarc_unknown`. Tests:
+  `tests/unit/mailgun-mapping.test.ts` (four RFC forms) and the N-5 pipeline case in
+  `tests/review/dmarc-gate-payloads-a-d.test.ts`.
+- **N-6 — fixed.** `combine` now also compares the evaluated domain: if the other source names a
+  `dmarcDomain` that differs from the authoritative one (or the authoritative one has none), the
+  verdict is `unknown`. Synthetic `dmarc-domain` is lowercased so the comparison is
+  case-insensitive like `header.from`. Tests: unit (both modes) + pipeline N-6 (both modes).
+- **N-7 — fixed.** README security model states the one-source rule and the residual; ADR 11
+  carries the fix pass 6/6b paragraph; README test count updated.
+
+Suite after fix pass 6b: 356 passed, 7 live-gated skips, zero `it.fails`.

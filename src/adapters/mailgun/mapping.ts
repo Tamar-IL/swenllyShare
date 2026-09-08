@@ -106,9 +106,19 @@ function parseAuthenticationResultsValue(value: string): {
   authservId: string;
   auth: AuthExtraction;
 } {
-  const semiIdx = value.indexOf(';');
-  const authservId = (semiIdx === -1 ? value : value.slice(0, semiIdx)).trim().toLowerCase();
-  const resinfo = semiIdx === -1 ? '' : value.slice(semiIdx + 1);
+  // RFC 8601 §2.2: `authres-header-field = "Authentication-Results:" [CFWS] authserv-id
+  // [CFWS authres-version] ( no-result / 1*resinfo )`. CFWS may contain `(comments)`.
+  // Fix pass 6b (critic N-5): a genuine `mxa.host 1; dmarc=fail` or `mxa.host (comment);
+  // dmarc=fail` used to be discarded (the whole prefix was taken as the authserv-id), which
+  // let an attacker's plain-form forgery become the "unique" match. Strip comments, then
+  // take the first token before `;` (a `value`, possibly quoted) as the authserv-id and
+  // ignore the optional version digits.
+  const withoutComments = value.replace(/\([^()]*\)/g, ' ');
+  const semiIdx = withoutComments.indexOf(';');
+  const prefix = semiIdx === -1 ? withoutComments : withoutComments.slice(0, semiIdx);
+  const firstToken = prefix.trim().split(/\s+/)[0] ?? '';
+  const authservId = firstToken.replace(/^"|"$/g, '').toLowerCase();
+  const resinfo = semiIdx === -1 ? '' : withoutComments.slice(semiIdx + 1);
 
   const dmarcMatch = /\bdmarc\s*=\s*([a-z]+)/i.exec(resinfo);
   const spfMatch = /\bspf\s*=\s*([a-z]+)/i.exec(resinfo);
@@ -198,7 +208,7 @@ function readMailgunFields(
     dmarc: normalizeDmarc(dmarcRaw ?? undefined) ?? 'unknown',
     spf: field(SPF_MAILGUN_FIELD),
     dkim: field(DKIM_MAILGUN_FIELD),
-    dmarcDomain: field(DMARC_DOMAIN_MAILGUN_FIELD),
+    dmarcDomain: field(DMARC_DOMAIN_MAILGUN_FIELD)?.toLowerCase() ?? null,
   };
   const anySignal =
     dmarcRaw !== null || auth.spf !== null || auth.dkim !== null || auth.dmarcDomain !== null;
@@ -206,12 +216,21 @@ function readMailgunFields(
 }
 
 /** Rule 4: the authoritative source's verdict, unless the other source is ambiguous or
- * present-and-disagreeing on DMARC — then `unknown`. */
+ * present-and-disagreeing — on the DMARC verdict OR on the evaluated `header.from` domain
+ * (fix pass 6b, critic N-6: gate 6 aligns the From address against `dmarcDomain`, so a
+ * forged domain is as dangerous as a forged verdict). If the other source names a domain
+ * and the authoritative one does not, that is a disagreement too. */
 function combine(authoritative: SourceReading, other: SourceReading): AuthExtraction {
   if (authoritative.status !== 'present') return EMPTY_AUTH;
   if (other.status === 'ambiguous') return EMPTY_AUTH;
-  if (other.status === 'present' && other.auth.dmarc !== authoritative.auth.dmarc) {
-    return EMPTY_AUTH;
+  if (other.status === 'present') {
+    if (other.auth.dmarc !== authoritative.auth.dmarc) return EMPTY_AUTH;
+    if (
+      other.auth.dmarcDomain !== null &&
+      other.auth.dmarcDomain !== authoritative.auth.dmarcDomain
+    ) {
+      return EMPTY_AUTH;
+    }
   }
   return authoritative.auth;
 }

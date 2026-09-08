@@ -15,7 +15,7 @@ precedence: [`docs/00-README.md`](docs/00-README.md).
 
 ## Status: built, unverified against live providers
 
-**340 tests pass** (`pnpm test`, real Postgres + semantic fakes for every provider). **Zero live
+**356 tests pass** (`pnpm test`, real Postgres + semantic fakes for every provider). **Zero live
 calls have been made to Google Drive, Zoho WorkDrive, or Mailgun by anyone on this project** —
 every real adapter method is `@unverified-live` in
 [`docs/verification-ledger.md`](docs/verification-ledger.md) (generated from those markers, CI
@@ -110,15 +110,19 @@ DMARC/SPF/DKIM field-name guess against a live payload).
 
 ## Security model
 
-- **DMARC read from `message-headers`-backed sources only, fail-closed otherwise.** When
-  Mailgun's `message-headers` array is present, DMARC/SPF/DKIM come from Mailgun's own
-  synthetic fields or a `message-headers` `Authentication-Results` entry whose authserv-id
-  matches `MAILGUN_AUTHSERV_ID` exactly — never the flat namespace attacker-controlled MIME
-  headers also occupy. When `message-headers` is absent, every auth field reads `unknown`
-  and the request is quarantined — the anti-forgery check that distinguishes a genuine
-  provider field from an attacker's own header depends entirely on it being present, so
-  its absence can never be treated as a pass (fix pass 5, F-B). A `pass` with no domain to
-  align against is quarantined either way.
+- **DMARC from exactly one provider-asserted source, fail-closed on any ambiguity.** The
+  operator chooses `INBOUND_AUTH_SOURCE` after the live capture (spike 3): `mailgun-fields`
+  (Mailgun's synthetic `dmarc`/`dmarc-domain` fields, the default) or `authentication-results`
+  (the RFC 8601 header inside `message-headers`, exactly one entry naming
+  `MAILGUN_AUTHSERV_ID` by exact string equality). There is no fallback between the two. A
+  verdict is `unknown` (quarantine) when `message-headers` is absent, when a synthetic field
+  name also appears as a MIME header, when two `Authentication-Results` name our authserv-id,
+  or when the two sources disagree on the verdict or the evaluated domain — so a forged header
+  can only ever downgrade a verdict. A `pass` with no domain to align against is quarantined.
+  **Stated residual:** in `authentication-results` mode a single forged entry is
+  indistinguishable from a genuine stamp if Mailgun stamps none, which is why that mode is
+  permitted only after spike 3c proves Mailgun stamps its own header on every message, and why
+  `INBOUND_REQUESTS_ENABLED` defaults to `false`.
 - **Token-only file resolution.** An address resolves to a file by its opaque `request_token`
   alone — never subject/body/slug; the distribution link's `public_slug` is a separate token.
 - **Deliver to the verified From address only.** Reply-To/Sender/Cc/Bcc/body-named addresses are
