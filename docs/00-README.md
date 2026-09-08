@@ -38,3 +38,18 @@ white-label goal, shipped behind a feature flag that stays OFF until `swenlly.co
 
 **Unresolved items are carried as Open Questions in the PRD, never silently resolved.** The
 quality gates check work against the PRD's **Acceptance Criteria**.
+
+## Build artifacts
+
+Produced during the build, one link each:
+
+- `docs/design/` — advisor consult, architecture brief, UX brief, visual spec (the design-gate record).
+- `docs/security/` — AI red-team report and appsec review, each with a verdict and a fix-status section.
+- `docs/qa/` — sender-app QA report, verdict per acceptance criterion and fix status.
+- `docs/reviews/` — line-level code review.
+- `docs/runbooks/` — `run-and-deploy.md` (local/prod operation) and `live-spikes.md` (the four
+  manual, credentialed checks that turn a provider adapter from unverified to verified-live).
+- `docs/verification-ledger.md` — generated record of which external calls are verified-live vs.
+  unverified-live; CI fails if it drifts from the code.
+- `docs/decisions.md` — ADR-style log of the non-obvious build decisions, with rationale.
+- `docs/progress.md` — chunk-by-chunk build log.
