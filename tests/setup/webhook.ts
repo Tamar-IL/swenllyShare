@@ -66,9 +66,43 @@ export function buildSignedWebhookPayload(
     signature,
   };
   if (opts.dmarc !== undefined) payload.dmarc = opts.dmarc;
-  if (opts.dmarcDomain !== undefined) payload['dmarc-domain'] = opts.dmarcDomain;
+  if (opts.dmarcDomain !== undefined) {
+    payload['dmarc-domain'] = opts.dmarcDomain;
+  } else if (opts.dmarc === 'pass') {
+    // F-2 hardening (docs/security/red-team-report.md): gate 6 now quarantines a `pass`
+    // with NO evaluated domain available anywhere (`dmarc_alignment_unknown`) — a real
+    // provider `pass` always carries the domain it was evaluated against. Auto-supply a
+    // well-formed `Authentication-Results` header aligned to the message's own `From`
+    // domain, so every OTHER test in this suite that asks this fixture for a plain
+    // `dmarc: 'pass'` happy path keeps getting a REALISTIC pass without needing to know
+    // about this gate. A test that wants the domain-less or mismatched cases specifically
+    // still gets them: pass `dmarcDomain` for a mismatch, or bypass this option entirely
+    // and set `payload.dmarc`/`payload['Authentication-Results']` by hand afterward (as
+    // `tests/redteam/auth-gate-bypass.test.ts`'s F-2 cases do).
+    const alignedDomain = fromAddresses[0]?.split('@').pop() ?? '';
+    payload['Authentication-Results'] = authenticationResultsHeader({ headerFrom: alignedDomain });
+  }
   if (opts.spf !== undefined) payload.spf = opts.spf;
   if (opts.dkim !== undefined) payload.dkim = opts.dkim;
 
   return payload;
+}
+
+/**
+ * Builds a well-formed `Authentication-Results` header VALUE (RFC 8601-shaped) for tests
+ * that want to exercise the REAL primary auth-results path (`mapping.ts`'s source (a))
+ * instead of the guessed classic `dmarc`/`dmarc-domain` top-level fields (source (b)) —
+ * this is what a genuine Mailgun `pass` looks like. F-2 hardening
+ * (`docs/security/red-team-report.md`): a `dmarc=pass` with no `header.from=` at all is
+ * never trustworthy (`request-pipeline.ts` gate 6 quarantines it as
+ * `dmarc_alignment_unknown`), so any test payload asserting a `pass` proceeds must supply
+ * one via this helper rather than a bare `dmarc: 'pass'` with no evaluated domain.
+ */
+export function authenticationResultsHeader(opts: {
+  dmarc?: string;
+  headerFrom: string;
+  authservId?: string;
+}): string {
+  const authservId = opts.authservId ?? 'mx.mailgun.org';
+  return `${authservId}; dmarc=${opts.dmarc ?? 'pass'} header.from=${opts.headerFrom}`;
 }

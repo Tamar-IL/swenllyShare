@@ -120,7 +120,10 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
         file: {
           id: file.id,
           displayName: file.display_name,
-          isExpired: displayStatus === 'expired',
+          // Bug 4 (QA report): a deleted file must read as inactive exactly like an
+          // expired one (UX brief: deleting is "equivalent to instant expiry") — treat
+          // `deleted` like `expired` in this read model so both artifact cards disable.
+          isExpired: displayStatus === 'expired' || displayStatus === 'deleted',
           isPublishing: displayStatus === 'publishing',
           isFailed: displayStatus === 'failed',
           pillClass: STATUS_META[displayStatus].pillClass,
@@ -147,6 +150,9 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
         flash,
         dmarcNote: DMARC_NOTE,
         deliverySinceIso: deliveriesResult.items[0]?.created_at.toISOString() ?? '',
+        // Bug 1 (QA report): paired with deliverySinceIso as a `(created_at, id)` keyset
+        // cursor — see src/db/repositories/deliveries.ts listForFile()'s doc comment.
+        deliverySinceId: deliveriesResult.items[0]?.id ?? '',
         deliveries: deliveriesResult.items.map((d) => ({
           address: d.requester_address,
           mechanismLabel: mechanismLabel(d.mechanism),
@@ -208,7 +214,15 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
     { preValidation: app.csrfProtection, preHandler: requireSessionHtml },
     async (request, reply) => {
       if (!request.tenantId) return;
-      await container.services.files.deleteFile(request.tenantId, request.params.id);
+      // Bug 2 (QA report): match the 404 contract every other tenant-scoped route in this
+      // file returns for a cross-tenant/unknown id — `deleteFile` returns `undefined` for
+      // exactly that case (a true no-op; nothing was touched), so the route must check it
+      // instead of always redirecting as if the delete succeeded.
+      const deleted = await container.services.files.deleteFile(
+        request.tenantId,
+        request.params.id,
+      );
+      if (!deleted) return renderNotFound(reply);
       return reply.redirect('/files?flash=deleted');
     },
   );

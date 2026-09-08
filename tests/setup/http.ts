@@ -34,8 +34,14 @@ export async function getCsrfToken(
   app: FastifyInstance,
   jar: CookieJar,
   path = '/signin',
+  opts: { remoteAddress?: string } = {},
 ): Promise<string> {
-  const res = await app.inject({ method: 'GET', url: path, headers: { cookie: jar.header() } });
+  const res = await app.inject({
+    method: 'GET',
+    url: path,
+    headers: { cookie: jar.header() },
+    remoteAddress: opts.remoteAddress,
+  });
   jar.absorb(res.headers['set-cookie']);
   const match =
     /name="_csrf" value="([^"]+)"/.exec(res.body) ?? /data-csrf="([^"]+)"/.exec(res.body);

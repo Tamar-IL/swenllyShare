@@ -192,6 +192,13 @@ img,
 svg {
   max-width: 100%;
 }
+/* Bug 7 (QA report): Chromium does not apply the UA `[hidden]` rule to a root <svg> the
+   way it does for ordinary HTML elements, so layout.eta's icon-sprite `<svg hidden>`
+   renders at its default replaced-element size (300x150) instead of collapsing — a
+   phantom ~150px band pushing every page's header down. Force it explicitly. */
+svg[hidden] {
+  display: none;
+}
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

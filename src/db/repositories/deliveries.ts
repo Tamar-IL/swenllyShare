@@ -121,19 +121,35 @@ export const deliveries = {
   },
 
   /** `GET /api/files/:id/deliveries` — required index order `(tenant_id, file_id,
-   * created_at desc)`; `since` paginates by created_at cursor. */
+   * created_at desc)`.
+   *
+   * Bug 1 (`docs/qa/qa-report-sender-app.md`): `since` alone is NOT a safe cursor on its
+   * own. It round-trips through `Date#toISOString()` (millisecond precision) on both ends
+   * while `created_at` is Postgres `timestamptz` (microsecond precision), so a plain
+   * `created_at > since` stays true for the very row `since` was derived from forever —
+   * every poll re-matches and re-appends its own anchor row. The fix is a `(created_at,
+   * id)` keyset: pass `sinceId` (the anchor row's own id) alongside `since` and this
+   * floors the range on the (possibly-truncated) timestamp for `since >= $3` while
+   * excluding the exact anchor row by id, which is exact regardless of any timestamp
+   * precision loss. Callers that only have a bare timestamp (no id) fall back to the
+   * original strict `>` comparison — no worse than before, just not the robust path.
+   */
   async listForFile(
     db: Queryable,
     tenantId: string,
     fileId: string,
-    opts: { since?: Date; limit?: number } = {},
+    opts: { since?: Date; sinceId?: string; limit?: number } = {},
   ): Promise<DeliveryRow[]> {
     if (opts.since) {
       const { rows } = await db.query<DeliveryRow>(
         `SELECT * FROM deliveries
-         WHERE tenant_id = $1 AND file_id = $2 AND created_at > $3
-         ORDER BY created_at DESC LIMIT $4`,
-        [tenantId, fileId, opts.since, opts.limit ?? 100],
+         WHERE tenant_id = $1 AND file_id = $2
+           AND (
+             ($4::uuid IS NULL AND created_at > $3)
+             OR ($4::uuid IS NOT NULL AND created_at >= $3 AND id <> $4)
+           )
+         ORDER BY created_at DESC LIMIT $5`,
+        [tenantId, fileId, opts.since, opts.sinceId ?? null, opts.limit ?? 100],
       );
       return rows;
     }

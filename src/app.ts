@@ -85,7 +85,7 @@ export async function buildApp({ container }: BuildAppOptions): Promise<FastifyI
   });
   await app.register(rateLimit, { global: false });
   await registerCsrfPlugin(app);
-  await registerSecurityHeaders(app);
+  await registerSecurityHeaders(app, { BRANDED_PAGE_ENABLED: config.BRANDED_PAGE_ENABLED });
 
   registerAuthPlugin(app, container);
   registerErrorHandler(app);

@@ -11,7 +11,10 @@ import { buildApp } from '../../src/app.js';
  */
 describe.skipIf(!hasTestDatabase())('CSP headers (architecture.md §10)', () => {
   it('GET /signin sends a CSP that allows Google Fonts but still forbids inline scripts', async () => {
-    const container = buildTestContainer();
+    // F-12 (docs/security/red-team-report.md): frame-src only names the Zoho embed
+    // origin while the branded page is enabled (see the dedicated test below for the
+    // flag-off case) -- explicitly on here so this test still exercises that directive.
+    const container = buildTestContainer({ BRANDED_PAGE_ENABLED: true });
     const app = await buildApp({ container });
 
     const res = await app.inject({ method: 'GET', url: '/signin' });
@@ -38,6 +41,25 @@ describe.skipIf(!hasTestDatabase())('CSP headers (architecture.md §10)', () => 
     expect(value).toContain('frame-src https://workdrive.zohoexternal.com');
     expect(value).toContain("frame-ancestors 'none'");
   });
+
+  it(
+    'F-12 fix: GET /signin does NOT name the Zoho embed origin in its CSP while the ' +
+      'branded page is off (the default, until a customer domain is whitelisted) -- ' +
+      'previously the global CSP advertised frame-src unconditionally on EVERY response, ' +
+      'a white-label leak in exactly the state AC-U3 cares most about hiding it in',
+    async () => {
+      const container = buildTestContainer({ BRANDED_PAGE_ENABLED: false });
+      const app = await buildApp({ container });
+
+      const res = await app.inject({ method: 'GET', url: '/signin' });
+      expect(res.statusCode).toBe(200);
+      const csp = String(res.headers['content-security-policy']);
+      expect(csp).not.toContain('workdrive.zohoexternal.com');
+      expect(csp).not.toContain('frame-src');
+      // Framing lockdown and everything else stay untouched by the flag.
+      expect(csp).toContain("frame-ancestors 'none'");
+    },
+  );
 
   it('the rendered <head> only ever references self-hosted or allow-listed font origins', async () => {
     const container = buildTestContainer();

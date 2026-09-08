@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { files, type FileRow, type AllowlistMode } from '../db/repositories/files.js';
 import { fileAllowlist } from '../db/repositories/file-allowlist.js';
+import { withTransaction } from '../db/pool.js';
 import type { Clock } from '../ports/clock.js';
 import { AppError, ErrorCode } from '../lib/errors.js';
 
@@ -82,6 +83,15 @@ export class SettingsService {
     }
   }
 
+  /**
+   * Bug 3 (`docs/qa/qa-report-sender-app.md`): a settings save is one submission and must
+   * be all-or-nothing. Two things were needed, not one: (1) validate *everything* —
+   * including every allowlist pattern — before any write is issued, so a bad line is
+   * rejected before `files.updateSettings` ever runs; (2) the two writes that do land
+   * (`files.updateSettings` and `fileAllowlist.replaceAll`) must commit together in one
+   * transaction, so a later failure (e.g. the file having vanished between validation and
+   * write) can't leave one committed and the other not.
+   */
   async updateSettings(
     tenantId: string,
     fileId: string,
@@ -106,20 +116,29 @@ export class SettingsService {
     }
     if (input.allowlistMode !== undefined) patch.allowlistMode = input.allowlistMode;
 
-    const updated = await files.updateSettings(this.pool, tenantId, fileId, patch);
-    if (!updated) {
-      throw new AppError(ErrorCode.NOT_FOUND, 404, 'file not found');
-    }
+    // Validate the whole submission up front — nothing below this point can throw for a
+    // reason the caller could have fixed by re-submitting, only NOT_FOUND (a race, not a
+    // validation failure) can still occur inside the transaction.
+    const patterns =
+      input.allowlist !== undefined
+        ? input.allowlist
+            .map((p) => p.trim())
+            .filter((p) => p !== '')
+            .map(validatePattern)
+        : undefined;
 
-    if (input.allowlist !== undefined) {
-      const patterns = input.allowlist
-        .map((p) => p.trim())
-        .filter((p) => p !== '')
-        .map(validatePattern);
-      await fileAllowlist.replaceAll(this.pool, tenantId, fileId, patterns);
-    }
+    return withTransaction(this.pool, async (client) => {
+      const updated = await files.updateSettings(client, tenantId, fileId, patch);
+      if (!updated) {
+        throw new AppError(ErrorCode.NOT_FOUND, 404, 'file not found');
+      }
 
-    return updated;
+      if (patterns !== undefined) {
+        await fileAllowlist.replaceAll(client, tenantId, fileId, patterns);
+      }
+
+      return updated;
+    });
   }
 
   async getAllowlist(tenantId: string, fileId: string): Promise<string[]> {

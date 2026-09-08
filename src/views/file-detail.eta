@@ -14,7 +14,10 @@
       it.flash            string|undefined  — shown by layout.eta, not repeated here
       it.dmarcNote        string            — the sender-facing DMARC caveat (UX brief §3)
       it.deliverySinceIso string            — newest delivery's created_at, '' if none;
-                                               island.js polls /deliveries?since=this
+                                               paired with deliverySinceId as a
+                                               `(created_at, id)` keyset cursor —
+                                               island.js polls /deliveries?since=&sinceId=
+      it.deliverySinceId  string            — newest delivery's id, '' if none (see above)
       it.deliveries        Array<{ address, mechanismLabel, pillClass, outcomeLabel, atLabel }>
 */%>
 <div class="page page-file-detail">
@@ -185,7 +188,7 @@
     </form>
   </section>
 
-  <section class="deliveries-section" id="deliveries" data-file-id="<%= it.file.id %>" data-since="<%= it.deliverySinceIso %>">
+  <section class="deliveries-section" id="deliveries" data-file-id="<%= it.file.id %>" data-since="<%= it.deliverySinceIso %>" data-since-id="<%= it.deliverySinceId %>">
     <h2>מי קיבל את הקובץ</h2>
     <% if (it.deliveries.length === 0) { %>
     <p class="deliveries-empty" id="deliveries-empty">עדיין אף אחד לא ביקש את הקובץ הזה</p>

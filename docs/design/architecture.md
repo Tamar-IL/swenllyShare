@@ -217,9 +217,11 @@ the database-engineer's.
 5. **DMARC gate** — only `dmarc === 'pass'` proceeds. `fail`, `none`, `unknown`, missing, or
    unparseable → `quarantined = true` + `deliveries.outcome='quarantined'`, **200**, no reply.
    We never re-derive DMARC and never infer pass from absence.
-6. **From-address sanity** — exactly one `From` address; reject multiples. When the provider
-   reports which domain DMARC was evaluated against, `from_domain` must equal it. The delivery
-   address is `fromHeaderAddress` and nothing else (AC-R3).
+6. **From-address sanity** — exactly one `From` address; reject multiples. The provider must
+   report which domain DMARC was evaluated against and it must equal `from_domain` — a `pass`
+   with no evaluated domain available at all is quarantined (`dmarc_alignment_unknown`), never
+   accepted (F-2 hardening, `docs/security/red-team-report.md`). The delivery address is
+   `fromHeaderAddress` and nothing else (AC-R3).
 7. **Rate gates** (sliding windows in Postgres, §3): per requester address
    (`RATE_REQUESTER_PER_HOUR`, default 5), per file (`RATE_FILE_PER_HOUR`, 60), per tenant
    (`RATE_TENANT_PER_HOUR`, 300). Exceeded → audit row `rate_limited`, no reply.

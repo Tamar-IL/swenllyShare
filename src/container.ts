@@ -219,7 +219,10 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
     auth: new AuthService(
       pool,
       { tokenGen, clock, outboundMail },
-      { PUBLIC_BASE_URL: config.PUBLIC_BASE_URL },
+      {
+        PUBLIC_BASE_URL: config.PUBLIC_BASE_URL,
+        RATE_MAGICLINK_PER_HOUR: config.RATE_MAGICLINK_PER_HOUR,
+      },
     ),
     files: new FilesService(
       pool,

@@ -301,6 +301,10 @@
     var table = document.getElementById('deliveries-table');
     var emptyNote = document.getElementById('deliveries-empty');
     var since = deliveriesSection.getAttribute('data-since') || '';
+    // Bug 1 (QA report): paired with `since` as a `(created_at, id)` keyset cursor so the
+    // poll never re-matches its own anchor row — see deliveries.ts listForFile()'s doc
+    // comment for why `since` alone (millisecond-precision) isn't a safe cursor on its own.
+    var sinceId = deliveriesSection.getAttribute('data-since-id') || '';
 
     function mechanismLabel(m) {
       if (m === 'attachment') return 'קובץ מצורף';
@@ -352,7 +356,11 @@
         '/api/files/' +
         fileId +
         '/deliveries' +
-        (since ? '?since=' + encodeURIComponent(since) : '');
+        (since
+          ? '?since=' +
+            encodeURIComponent(since) +
+            (sinceId ? '&sinceId=' + encodeURIComponent(sinceId) : '')
+          : '');
       fetch(url, { headers: { accept: 'application/json' } })
         .then(function (res) {
           return res.ok ? res.json() : null;
@@ -366,6 +374,7 @@
               prependRow(item);
             });
           since = data.items[0].at;
+          sinceId = data.items[0].id;
           if (emptyNote) emptyNote.hidden = true;
           if (table) table.hidden = false;
           announce('התקבלה בקשה חדשה לקובץ');

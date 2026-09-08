@@ -125,7 +125,10 @@ export function isVideoMime(mime: string): boolean {
 }
 
 /** Human-readable byte ceiling for the upload screen's size-limit line (UX brief §1.3:
- * "state a concrete ceiling in the UI before upload starts"). */
+ * "state a concrete ceiling in the UI before upload starts"). Bug 5 (QA report): needs a
+ * KB tier — without one, any cap under 1MB rounded to "0MB", disagreeing with the
+ * client-side `humanSize()` in `island.js` which already formats the same value
+ * correctly. Mirrors that function's tiers/rounding for consistency between the two. */
 export function formatByteCeiling(bytes: number): string {
   const gb = bytes / 1024 ** 3;
   if (gb >= 1) {
@@ -133,5 +136,9 @@ export function formatByteCeiling(bytes: number): string {
     return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}GB`;
   }
   const mb = bytes / 1024 ** 2;
-  return `${Math.round(mb)}MB`;
+  if (mb >= 1) {
+    return `${Math.round(mb)}MB`;
+  }
+  const kb = bytes / 1024;
+  return `${Math.round(kb)}KB`;
 }

@@ -360,6 +360,69 @@ in the `integration` project's `include` list) so this file runs under `pnpm tes
 
 ---
 
+## Fix status (backend-engineer pass, 2026-09-08)
+
+All 8 bugs below are fixed. `tests/qa/qa-sender-app-regressions.test.ts`'s 5 originally-pinned
+`it.fails` cases are flipped to `it` and pass; 1 new case was added for Bug 4 (feasible at HTTP
+level) and 2 new cases were added elsewhere for Bug 8 (`tests/unit/error-handler.test.ts`, pure
+function + a real Fastify instance asserting the actual log level). Bug 7 (CSS-only, no
+functional/HTTP surface) has no automated regression test — see its entry below. Full suite:
+`pnpm typecheck && pnpm lint && pnpm exec prettier --check . && pnpm test && pnpm gen:ledger --
+--check` all green, 284 passed / 7 skipped, **zero `it.fails` anywhere in `tests/`**.
+
+- **Bug 1 (High, deliveries cursor duplication) — fixed.** Redesigned as a `(created_at, id)`
+  keyset cursor: `deliveries.listForFile()` now takes an optional `sinceId` and excludes the
+  anchor row by id (`created_at >= since AND id <> sinceId`) instead of relying on a
+  millisecond-precision `created_at > since` alone; falls back to the original strict `>` when
+  no `sinceId` is given (no worse than before for a caller that doesn't have one). `GET
+  /api/files/:id/deliveries` now accepts `sinceId` and returns each item's `id`; the file-detail
+  page emits a paired `data-since`/`data-since-id`; `island.js`'s poll keeps both in sync. Test:
+  `tests/qa/qa-sender-app-regressions.test.ts` (flipped, plus a same-cursor-returns-nothing AND a
+  genuinely-new-row-still-comes-through assertion).
+- **Bug 2 (Medium, cross-tenant delete false-success) — fixed.** `POST /files/:id/delete` now
+  checks `FilesService.deleteFile()`'s return value and 404s when it's `undefined` (cross-tenant
+  or unknown id), matching every sibling tenant-scoped route in the file. Test: flipped pin.
+- **Bug 3 (Medium, settings save not atomic) — fixed.** `SettingsService.updateSettings()` now
+  validates every allowlist pattern BEFORE issuing any write, then commits `files.updateSettings`
+  and `fileAllowlist.replaceAll` together inside one `withTransaction` — a bad pattern can no
+  longer leave `displayName`/`expiry`/`allowlistMode` partially committed. Test: flipped pin.
+- **Bug 4 (Medium/Low, deleted file shows live artifacts) — fixed.** `GET /files/:id` now treats
+  `displayStatus === 'deleted'` like `'expired'` for the `isExpired` read-model field, so both
+  artifact cards disable/warn exactly like an expired file. Test: new case added to
+  `tests/qa/qa-sender-app-regressions.test.ts` (HTTP-level — asserts the rendered `is-disabled`
+  class on both cards after a real delete).
+- **Bug 5 (Low, `formatByteCeiling` "0MB") — fixed.** Added a KB tier (mirrors `island.js`'s
+  client-side `humanSize()`), so any cap under 1MB now renders correctly (e.g. "2KB" for 2000
+  bytes) instead of rounding to "0MB". Test: flipped pin.
+- **Bug 6 (Low/Medium, sign-in rate limit IP-only) — fixed.** Now genuinely per IP AND per email,
+  matching architecture.md §8: the `@fastify/rate-limit` route registration is keyed by the
+  `(ip, email)` pair (was IP alone) so a burst for one address no longer exhausts the budget for
+  every other address behind a shared IP/NAT; `AuthService.requestMagicLink` additionally enforces
+  a genuinely IP-independent per-email cap on the same Postgres sliding window every other rate
+  gate uses (`rate_limit_counters` / `RateLimitService`'s mechanism), keyed purely by email.
+  Test: flipped pin, rewritten to actually exercise CSRF + the rate limiter (the original pin
+  posted with no CSRF token/cookie at all and was passing only because that 403'd before ever
+  reaching the code under test — corrected in the same pass since it was being rewritten anyway).
+  Covers: 3 different addresses from one IP (none blocked), the same address repeated past the
+  cap from one IP (still blocked, unchanged), and the same address from 3 different IPs (the
+  domain-level per-email cap still applies — verified via suppressed outbound mail, not HTTP
+  status, since the response is always 200 by the no-enumeration design either way).
+- **Bug 7 (Medium, visual, `<svg hidden>` blank band) — fixed.** Added `svg[hidden]{display:
+  none}` to `app.css`'s reset section — Chromium doesn't apply the `[hidden]` UA rule to a root
+  `<svg>` the way it does for ordinary elements. No automated test: this is a pure rendering bug
+  with no HTTP/DOM-structure signature to assert on at the `app.inject()`/unit level available in
+  this codebase (no Playwright/browser harness in `tests/`); flagged as a gap, consistent with
+  this pass's remit (unit/integration tests only).
+- **Bug 8 (Low, operational, ECONNRESET logged as error) — fixed.** `error-handler.ts` now
+  classifies `ECONNRESET`/`ECONNABORTED`/`EPIPE` (`isClientAbortError`, newly exported) and logs
+  those at `info`, not `error` — a legitimate upload-cancel click no longer produces an
+  error-rate-dashboard-polluting "unhandled error" log line. HTTP response/status is unchanged.
+  Test: new `tests/unit/error-handler.test.ts` — a pure-function check for the classifier, plus a
+  real Fastify instance + custom log stream asserting the actual emitted log level (never 50) for
+  a classified error, and unchanged (`50`) for a genuine unexpected error.
+
+---
+
 ## Files referenced in this report
 
 - `src/http/routes/files.ts` (lines 123, ~206-214)
@@ -375,3 +438,14 @@ in the `integration` project's `include` list) so this file runs under `pnpm tes
   project's `include`)
 
 Screenshots and raw run logs: `/tmp/claude-0/qa-out/` (not committed — local evidence only).
+
+### Additionally touched by the fix pass (2026-09-08)
+
+- `src/http/routes/api-files.ts` (`GET /api/files/:id/deliveries` — `sinceId`, `id` in response)
+- `src/domain/audit.ts` (`listForFile` opts passthrough)
+- `src/domain/auth.ts` (`AuthServiceConfig`, per-email rate cap in `requestMagicLink`)
+- `src/http/routes/signin.ts` (rate-limit `keyGenerator`/`hook`)
+- `src/http/plugins/error-handler.ts` (`isClientAbortError`, new export)
+- `src/container.ts` (`AuthService` construction — `RATE_MAGICLINK_PER_HOUR`)
+- `tests/setup/http.ts` (`getCsrfToken` — optional `remoteAddress`)
+- `tests/unit/error-handler.test.ts` (new)

@@ -389,6 +389,11 @@ bug being fixed were corrected (noted below) so their expectations match the fix
 rather than the vulnerability. Details, decisions, and what was not verified are in this
 session's backend-engineer report; this section is the finding-by-finding summary.
 
+**Addendum — F-2/F-12 hardening pass (same day, follow-on session):** F-2's disagreement was
+resolved (quarantine a domain-less `pass`, per orchestrator decision) and F-12's CSP sub-finding
+was fixed now that `security-headers.ts` was back in remit. See those two findings' entries below
+for what changed; every other finding's status below is unchanged from the original pass.
+
 ### F-1 · CRITICAL · fixed
 `src/adapters/mailgun/mapping.ts` no longer probes guessed key names for DMARC/SPF/DKIM.
 `extractAuthResult` reads only (a) an `Authentication-Results` entry in Mailgun's documented
@@ -410,23 +415,36 @@ never exercises (its payloads never populate `message-headers`).
 **Still `@unverified-live`** — this is a mapping-logic fix proven against synthetic payloads, not
 a live-payload confirmation. The field-name guess remains a guess until spike 3 is actually run.
 
-### F-2 · HIGH · partially fixed — see disagreement note
+### F-2 · HIGH · fully fixed (orchestrator decision, 2026-09-08 hardening pass)
 The root-cause bug (alignment silently skipped because `dmarcDomain` extraction failed to find
-the domain even when the provider reported it) is fixed by F-1's mapping rewrite: `dmarcDomain`
-is now correctly read from `Authentication-Results`, so gate 6's existing
-`if (dmarcDomain && mismatch)` check now actually fires (RT-02).
-**I did NOT implement** the stronger recommendation in this finding's own "Fix" note — quarantine
-whenever `dmarc === 'pass'` but no domain can be read AT ALL (reason `dmarc_alignment_unknown`).
-Doing so breaks 6 already-pinned tests in the same file (`auth-gate-bypass.test.ts`'s `SANITY`
-positive-control and the 5 `DOCUMENTED` case/whitespace-tolerance cases), which explicitly send
-`dmarc: 'pass'` with no domain field at all and assert delivery succeeds — matching
-architecture.md §4.6's own conditional wording ("When the provider reports which domain DMARC
-was evaluated against..."). This is a real inconsistency inside the red-team's own pinned suite:
-this finding's narrative wants unconditional fail-closed, but `SANITY`/`DOCUMENTED` in the same
-file pin the lenient behavior for exactly the case that narrative would newly reject. I did not
-break pinned tests to resolve it unilaterally. Recommend trust-safety/architect decide which side
-gives: rewrite `SANITY`/`DOCUMENTED` to always include a `dmarcDomain`, or accept the narrower fix.
-Test: `RT-02` passes as-is; `SANITY`/`DOCUMENTED`×5/case-whitespace test still pass, unchanged.
+the domain even when the provider reported it) was fixed by F-1's mapping rewrite: `dmarcDomain`
+is correctly read from `Authentication-Results`, so gate 6's alignment check actually fires
+(RT-02). A prior pass here stopped short of this finding's own stronger "Fix" recommendation —
+quarantine whenever `dmarc === 'pass'` but no domain can be read AT ALL — because it broke
+`auth-gate-bypass.test.ts`'s `SANITY`/`DOCUMENTED` cases, which sent `dmarc: 'pass'` with no
+domain field at all and asserted delivery succeeds. That was flagged as an unresolved
+disagreement between this finding's narrative and those pins.
+**Resolved:** per PRD precedence rule 4 (safety/consent invariants may only be made stricter, not
+looser), the orchestrator decided in favor of this finding's original recommendation. Gate 6
+(`src/domain/request-pipeline.ts`) now quarantines `dmarc === 'pass'` with no evaluated domain
+at all — reason `dmarc_alignment_unknown` — as a step BEFORE the existing mismatch check, which
+is unchanged. `SANITY`/`DOCUMENTED` were not weakened to accommodate this: they were corrected,
+because a domain-less `pass` was never a realistic payload to begin with — a genuine provider
+`pass` always carries the domain it evaluated (that's what `header.from=` in a real
+`Authentication-Results` header is). Both now supply one via a proper `Authentication-Results`
+header (`tests/setup/webhook.ts`'s new `authenticationResultsHeader()` helper) instead of a bare
+`dmarc: 'pass'` field with no domain — matching what a real pass looks like, not loosening what
+they test. Every existing attack-case assertion in the file is unchanged; a new case,
+`BLOCKED (F-2 hardening): dmarc=pass with NO evaluated domain...`, pins the newly-stricter
+behavior directly. `buildSignedWebhookPayload`'s shared `dmarc: 'pass'` option now auto-supplies
+an aligned `Authentication-Results` header by default (so every OTHER test across the suite that
+asks for a plain `pass` happy path keeps getting a realistic one, with zero changes needed at
+those call sites) — a test wanting the domain-less case specifically bypasses that option and
+sets `payload.dmarc` by hand, as the two `SANITY`/`DOCUMENTED`/new cases now do.
+architecture.md §4 gate 6's wording was updated to state the domain-less-quarantine rule.
+Test: `RT-02` passes unchanged; `SANITY`/`DOCUMENTED`×5 pass on corrected (realistic) payloads;
+new `BLOCKED (F-2 hardening)` case pins the fix. Full suite: `pnpm test` — 284 passed, 7 skipped,
+zero `it.fails` anywhere in `tests/`.
 
 ### F-3 · HIGH · fixed
 New `src/lib/email-address.ts`: a hand-written RFC 5322-ish mailbox parser (display names,
@@ -567,13 +585,26 @@ needed for uniqueness itself. Test: `RT-22`; `tests/integration/inbound-messages
 "provider_message_id is also unique" test previously asserted the old THROWING behavior
 (demonstrating the bug, not guarding against it) — updated to assert the graceful dedupe.
 
-### F-12 · INFORMATIONAL · not fixed, deliberately
-Both sub-findings left as-is:
-- The CSP `frame-src` scoping fix requires editing `src/http/plugins/security-headers.ts`, which
-  is explicitly out of this pass's remit (owned by concurrent frontend work per the orchestrator's
-  instructions).
-- Adding per-IP rate limiting to `/s/:slug`/`/s/:slug/download` would flip the pinned
-  `"OBSERVED: neither public route is rate-limited..."` test (currently asserting no 429 ever
-  fires), which this pass's instructions direct against weakening without being asked.
-Both `OBSERVED` tests in `public-share-surface.test.ts` are unchanged and still pass, documenting
-current (unfixed) behavior as originally intended.
+### F-12 · INFORMATIONAL · CSP sub-finding fixed; rate-limiting sub-finding left as-is, deliberately
+**CSP `frame-src` leak — fixed (2026-09-08 hardening pass):** `src/http/plugins/security-headers.ts`
+is no longer out of remit, so the cheap half of this finding is closed. The global CSP no longer
+names `https://workdrive.zohoexternal.com` unconditionally — `registerSecurityHeaders` now takes
+`BRANDED_PAGE_ENABLED` and only adds `frame-src` when the flag is on. With the flag off (the
+default, until a customer's domain is whitelisted per architecture.md §7), `frame-src` is absent
+entirely and CSP falls back to `default-src 'self'`, which already blocks the Zoho frame outright
+— nothing is lost, since `public-share.ts` 404s `/s/:slug` unconditionally while the flag is off
+anyway. This is a genuine improvement to the observed behavior in the common (flag-off) case, so
+`tests/integration/security-headers.test.ts`'s existing CSP test was updated to build its
+container with `BRANDED_PAGE_ENABLED: true` (so it still exercises the frame-src directive) and a
+new test pins the flag-off case (no `frame-src`, no `zohoexternal.com`, anywhere in the header).
+The `OBSERVED` `frame-src` pin in `public-share-surface.test.ts` was **not** changed — it already
+builds its container with `BRANDED_PAGE_ENABLED: true`, so its observed behavior (frame-src still
+present while the flag is genuinely on and the branded page can render) is correctly unchanged by
+this fix; noting that explicitly since the general instruction was to touch an `OBSERVED` pin only
+when the fix changes what it observes for the better, and here it does not, for that specific case.
+**Rate-limiting sub-finding — still not fixed, deliberately:** adding a per-IP ceiling to
+`/s/:slug`/`/s/:slug/download` would flip the pinned `"OBSERVED: neither public route is
+rate-limited..."` test (currently asserting no 429 ever fires). Not exploitable against a 130-bit
+slug, no capability/token/URL leak, and out of scope for a "cheap fix" pass — left as originally
+scoped, matching the file's own stated non-exploitability. That `OBSERVED` test is unchanged and
+still passes, documenting current (unfixed) behavior as originally intended.

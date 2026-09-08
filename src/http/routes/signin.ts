@@ -28,7 +28,26 @@ export function registerSignInRoutes(app: FastifyInstance, container: Container)
     {
       preValidation: app.csrfProtection,
       config: {
-        rateLimit: { max: container.config.RATE_MAGICLINK_PER_HOUR, timeWindow: '1 hour' },
+        rateLimit: {
+          max: container.config.RATE_MAGICLINK_PER_HOUR,
+          timeWindow: '1 hour',
+          // Bug 6 (QA report): architecture.md §8 promises "per IP and per email," not
+          // "per IP regardless of email." A pure-IP key (the previous default) meant a
+          // burst of attempts for ONE address behind a shared IP/NAT silently exhausted
+          // the budget for every OTHER sender's address behind that same IP. Keying by
+          // the (IP, email) pair keeps this dimension scoped to "this IP repeatedly
+          // hammering this one address," and stops it from colliding across unrelated
+          // senders sharing an IP. The complementary per-email-only dimension (catches
+          // one address being targeted from many different IPs) is enforced separately
+          // in the Auth domain — see AuthService.requestMagicLink.
+          hook: 'preHandler',
+          keyGenerator: (request) => {
+            const email = ((request.body as SignInBody | undefined)?.email ?? '')
+              .trim()
+              .toLowerCase();
+            return `${request.ip}:${email}`;
+          },
+        },
       },
     },
     async (request: FastifyRequest<{ Body: SignInBody }>, reply) => {

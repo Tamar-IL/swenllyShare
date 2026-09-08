@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { hasTestDatabase, truncateAll } from '../setup/db.js';
 import { buildTestContainer } from '../setup/container.js';
 import { createTenantWithReadyFile } from '../setup/fixtures.js';
-import { buildSignedWebhookPayload } from '../setup/webhook.js';
+import { authenticationResultsHeader, buildSignedWebhookPayload } from '../setup/webhook.js';
 import { deliveries } from '../../src/db/repositories/deliveries.js';
 import { fileAllowlist } from '../../src/db/repositories/file-allowlist.js';
 import { files } from '../../src/db/repositories/files.js';
@@ -239,14 +239,27 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — inbound auth gate (AC-R1/AC-R3
         tenantSlug: tenant.slug,
         fromAddress: 'legit@relay.test',
       });
-      payload.dmarc = dmarcValue;
+      // F-2 hardening: a real `pass` always carries the evaluated `header.from` domain
+      // alongside it (that IS what a provider-asserted pass looks like) — a bare
+      // `dmarc=pass` with no domain at all now quarantines (`dmarc_alignment_unknown`),
+      // so this case, like SANITY below, supplies one via a real `Authentication-Results`
+      // header (mapping.ts source (a)) rather than the guessed `dmarc` field alone. The
+      // case/whitespace variance under test moves into the header's own `dmarc=` value,
+      // which `parseAuthenticationResultsValue`'s regex is equally tolerant of.
+      payload['Authentication-Results'] = authenticationResultsHeader({
+        dmarc: dmarcValue,
+        headerFrom: 'relay.test',
+      });
       const outcome = await container.services.requestPipeline.handleWebhook(payload);
       expect(outcome.deliveryId).toBeDefined();
     },
   );
 
-  it('SANITY: an exact `pass` from the provider proceeds', async () => {
-    // Pins the positive control for the whole file.
+  it('SANITY: an exact `pass` from the provider, with its evaluated domain, proceeds', async () => {
+    // Pins the positive control for the whole file. F-2 hardening: a `pass` MUST carry an
+    // evaluated `header.from` domain to be accepted at all (see DOCUMENTED cases' comment
+    // above) — this is a real provider-asserted `Authentication-Results` pass, not a
+    // domain-less one.
     const container = buildTestContainer();
     const { tenant, file } = await createTenantWithReadyFile(container, 'rt-ws@example.com');
     const payload = buildSignedWebhookPayload(container, {
@@ -254,10 +267,42 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — inbound auth gate (AC-R1/AC-R3
       tenantSlug: tenant.slug,
       fromAddress: 'legit@relay.test',
     });
-    payload.dmarc = 'pass';
+    payload['Authentication-Results'] = authenticationResultsHeader({ headerFrom: 'relay.test' });
     const outcome = await container.services.requestPipeline.handleWebhook(payload);
     expect(outcome.deliveryId).toBeDefined();
   });
+
+  it(
+    'BLOCKED (F-2 hardening): dmarc=pass with NO evaluated domain available anywhere ' +
+      'in the payload is quarantined, never accepted',
+    async () => {
+      const container = buildTestContainer();
+      const { tenant, file } = await createTenantWithReadyFile(
+        container,
+        'rt-align-unknown@example.com',
+      );
+      const payload = buildSignedWebhookPayload(container, {
+        requestToken: file.request_token,
+        tenantSlug: tenant.slug,
+        fromAddress: 'legit@relay.test',
+        // Deliberately NOT using the `dmarc` option here: `buildSignedWebhookPayload`
+        // auto-supplies an aligned `Authentication-Results` header whenever `dmarc:
+        // 'pass'` is passed that way (so every OTHER happy-path test in this suite gets a
+        // realistic pass) — this test exists specifically to construct the domain-less
+        // case that auto-fill exists to prevent everywhere else, so it sets the field by
+        // hand instead, exactly like SANITY/DOCUMENTED did before F-2 hardening.
+      });
+      // Provider asserts pass ... but reports no evaluated domain anywhere (no
+      // dmarc-domain field, no Authentication-Results header at all) — must fail closed.
+      payload.dmarc = 'pass';
+
+      const outcome = await container.services.requestPipeline.handleWebhook(payload);
+      expect(outcome.deliveryId).toBeUndefined();
+      const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
+      expect(rows[0]?.outcome).toBe('quarantined');
+      expect(rows[0]?.reason).toBe('dmarc_alignment_unknown');
+    },
+  );
 
   it('BLOCKED: display-name spoof `"victim@x" <attacker@y>` is rejected as multi-address', async () => {
     const container = buildTestContainer();

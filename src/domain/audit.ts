@@ -12,7 +12,7 @@ export class AuditService {
   async listForFile(
     tenantId: string,
     fileId: string,
-    opts: { since?: Date; limit?: number } = {},
+    opts: { since?: Date; sinceId?: string; limit?: number } = {},
   ): Promise<{ items: DeliveryRow[]; total: number }> {
     const [items, total] = await Promise.all([
       deliveries.listForFile(this.pool, tenantId, fileId, opts),

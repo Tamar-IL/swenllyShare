@@ -57,19 +57,23 @@ export function registerApiFileRoutes(app: FastifyInstance, container: Container
     },
   );
 
-  app.get<{ Params: { id: string }; Querystring: { since?: string } }>(
+  app.get<{ Params: { id: string }; Querystring: { since?: string; sinceId?: string } }>(
     '/api/files/:id/deliveries',
     { preHandler: requireSessionApi },
     async (request, _reply) => {
       if (!request.tenantId) return;
       const since = request.query.since ? new Date(request.query.since) : undefined;
+      // Bug 1 (QA report): `sinceId` is the other half of the `(created_at, id)` keyset
+      // cursor — see deliveries.ts listForFile()'s doc comment.
+      const sinceId = request.query.sinceId || undefined;
       const { items, total } = await container.services.audit.listForFile(
         request.tenantId,
         request.params.id,
-        { since },
+        { since, sinceId },
       );
       return {
         items: items.map((d) => ({
+          id: d.id,
           address: d.requester_address,
           mechanism: d.mechanism,
           outcome: d.outcome,

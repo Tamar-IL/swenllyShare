@@ -151,7 +151,26 @@ export class RequestPipeline {
       );
       return { status: 200 };
     }
-    if (msg.dmarcDomain && msg.dmarcDomain.toLowerCase() !== fromDomain) {
+    // F-2 hardening (docs/security/red-team-report.md, orchestrator decision: safety
+    // invariants may only get stricter, PRD precedence rule 4): a `pass` this pipeline
+    // cannot align to the `From` domain is not a pass. Previously this branch only fired
+    // `if (msg.dmarcDomain && ...)` — a `pass` with NO evaluated domain at all (the
+    // provider's `Authentication-Results` present but silent on `header.from`, or the
+    // classic guessed field simply absent) fell through and was accepted. An unaligned
+    // `pass` and an UNALIGNABLE `pass` are the same risk; both are now quarantined.
+    if (!msg.dmarcDomain) {
+      await this.quarantine(
+        parsedAddress.token,
+        inboundRow,
+        file.tenant_id,
+        file.id,
+        requesterAddress,
+        msg.dmarc,
+        'dmarc_alignment_unknown',
+      );
+      return { status: 200 };
+    }
+    if (msg.dmarcDomain.toLowerCase() !== fromDomain) {
       await this.quarantine(
         parsedAddress.token,
         inboundRow,
