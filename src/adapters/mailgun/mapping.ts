@@ -45,7 +45,11 @@ import { parseSingleMailbox } from '../../lib/email-address.js';
  * **Residual, stated plainly (not fixable in code):** in `authentication-results` mode, if
  * Mailgun does NOT stamp its own `Authentication-Results` on a message and the sender
  * forges exactly one naming our public authserv-id, it is indistinguishable from a genuine
- * stamp. That mode is therefore only safe if spike 3 (`docs/runbooks/live-spikes.md`)
+ * stamp; and the cross-check between sources is one-directional — if the authoritative
+ * source names an evaluated domain and the other source is present but silent about the
+ * domain, nothing is compared (critic N-10; deliberately not tightened, because the other
+ * source being silent is the normal shape when a provider offers only one signal, and
+ * tightening would trade a hypothetical for real false quarantines). That mode is therefore only safe if spike 3 (`docs/runbooks/live-spikes.md`)
  * proves Mailgun stamps its own header on EVERY message — including one that already
  * carries a forged copy (then there are two, and rule 3 quarantines). If spike 3 cannot
  * prove that, use `mailgun-fields`; if Mailgun provides neither signal, the inbound path

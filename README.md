@@ -122,7 +122,9 @@ DMARC/SPF/DKIM field-name guess against a live payload).
   **Stated residual:** in `authentication-results` mode a single forged entry is
   indistinguishable from a genuine stamp if Mailgun stamps none, which is why that mode is
   permitted only after spike 3c proves Mailgun stamps its own header on every message, and why
-  `INBOUND_REQUESTS_ENABLED` defaults to `false`.
+  `INBOUND_REQUESTS_ENABLED` defaults to `false`. The domain cross-check between sources is
+  one-directional (a source that is silent about the domain is not compared), so spike 3b must
+  also record whether Mailgun's synthetic fields carry `dmarc-domain`.
 - **Token-only file resolution.** An address resolves to a file by its opaque `request_token`
   alone — never subject/body/slug; the distribution link's `public_slug` is a separate token.
 - **Deliver to the verified From address only.** Reply-To/Sender/Cc/Bcc/body-named addresses are

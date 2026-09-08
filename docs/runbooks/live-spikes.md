@@ -279,6 +279,9 @@ dmarc=pass header.from=<your-domain>` (most MUAs can't add raw headers — use `
   `authentication-results` mode is **forbidden** — a forged single entry would be accepted.
   Use `mailgun-fields` (only if 3b found synthetic `dmarc`/`dmarc-domain` fields) or keep
   the inbound path closed.
+Also record in 3b whether the synthetic fields carry an evaluated domain (`dmarc-domain`) —
+if they do not, the domain cross-check between sources cannot run in `mailgun-fields` mode and
+gate 6 relies on the `Authentication-Results` `header.from` alone (critic N-10).
 Also confirm in 3b whether the synthetic fields, when present, survive a message that
 carries a MIME header of the same name (`Dmarc: pass`): the pipeline must quarantine it
 (`dmarc_unknown`, the collision rule) — if the payload shows only one `dmarc` value and no

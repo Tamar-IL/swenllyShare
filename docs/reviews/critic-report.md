@@ -1147,3 +1147,221 @@ two paragraphs of documentation.
   carries the fix pass 6/6b paragraph; README test count updated.
 
 Suite after fix pass 6b: 356 passed, 7 live-gated skips, zero `it.fails`.
+
+---
+
+## Third re-check verdict (Critic, 2026-09-08) — against HEAD `2b39008` (fix pass 6b)
+
+**Scope, as tasked:** verify N-5 (RFC 8601 authserv-id forms), N-6 (domain cross-check in
+`combine`), N-7 (documentation drift). Everything else in the per-AC table is **carried
+forward from the second re-check, not re-probed this pass** — I am saying so rather than
+implying fresh coverage.
+
+**Method:** 40 throwaway mapper probes and 24 throwaway pipeline probes (12 payload shapes ×
+both `INBOUND_AUTH_SOURCE` modes) written by me against HEAD, plus a full-suite re-run.
+Probes deleted; `src/**` untouched; working tree clean; nothing committed.
+
+**Full suite: 356 passed, 7 skipped, 60 files, zero failures.** (An earlier run of mine showed
+4 failures — that was my own artifact: two `vitest` runs racing on one `TEST_DATABASE_URL`. See
+N-9.)
+
+### Verdict: **SHIP-READY-FOR-LIVE-SPIKES**
+
+Both fatal-on-flip findings are genuinely closed, in code, verified structurally and end to
+end. The remaining items are minor and none of them blocks the live spikes or the default
+configuration.
+
+---
+
+### N-5 — **CLOSED.** The parser now follows RFC 8601's grammar, and I could not find a legal genuine form it misses
+
+`parseAuthenticationResultsValue` (`src/adapters/mailgun/mapping.ts:105-137`) strips CFWS
+comments, takes the first token before `;`, unquotes it, and ignores anything after it
+(including the version token). I fed it every form I could justify from the RFC plus the
+adversarial shapes the task named. **All thirteen genuine forms are now recognized** — the
+`dmarc=fail` survives into the verdict where it used to be silently discarded:
+
+| genuine form | before (pass 6) | now |
+|---|---|---|
+| `id; dmarc=fail` | recognized | recognized |
+| `id 1; …` version token | **discarded** | recognized |
+| `id (Mailgun); …` comment | **discarded** | recognized |
+| `(pre) id 1 (post); …` | **discarded** | recognized |
+| `"id"; …` quoted | **discarded** | recognized |
+| `id (a;b); …` comment containing `;` | discarded | recognized |
+| `id (a (b) c); …` nested parens | discarded | recognized |
+| `id vX; …` non-digit version token | discarded | recognized |
+| tab-separated · folded CRLF+WSP · uppercase id · trailing CFWS | mixed | all recognized |
+
+And the property that matters — **genuine + forged ⇒ ambiguous ⇒ quarantine** — holds for
+every pairing, at the pipeline, in `authentication-results` mode:
+
+```
+N5  genuine "id 1; dmarc=fail"      + forged plain pass -> quarantined / dmarc_unknown
+N5b genuine "id (Mailgun Inc);…"    + forged plain pass -> quarantined / dmarc_unknown
+N5c genuine "(pre) id 1 (post);…"   + forged plain pass -> quarantined / dmarc_unknown
+N5d genuine quoted "id";…           + forged plain pass -> quarantined / dmarc_unknown
+N5e genuine "id (a;b);…"            + forged plain pass -> quarantined / dmarc_unknown
+```
+
+I also attacked from the other side — forgery shapes designed to *avoid* being counted so the
+genuine one stands alone (which is safe) or to *impersonate* the id:
+
+- `evil.<id>` DNS-suffix forgery → not counted, genuine `fail` wins → `dmarc_fail`. (C″ closed.)
+- `(<id>) other.test; dmarc=pass` — id hidden inside a comment → comment stripped, `other.test`
+  is the id, not counted. Correct.
+- `<id> (x; dmarc=pass` — unbalanced paren, an obvious parser-desync attempt → still counted
+  as ours → ambiguous → quarantine.
+- `"<id>;x"; …` and `"<id> inc"; …` — `;` and space inside a quoted-string → still counted.
+  Over-permissive relative to a strict RFC parser, but the over-permissiveness runs in the
+  **fail-closed direction**: more headers counted as ours means more ambiguity means more
+  quarantine. An attacker cannot use it to *escape* the count, which is the only direction
+  that hurts.
+- `; <id>; dmarc=pass` — empty authserv-id → not counted → absent → `unknown`.
+- `<id>; none` — RFC no-result form → `dmarc=unknown` → quarantine.
+
+Regression pins are committed: `tests/unit/mailgun-mapping.test.ts:223-256` (four RFC forms)
+and `tests/review/dmarc-gate-payloads-a-d.test.ts:192`.
+
+### N-6 — **CLOSED**, with one residual asymmetry (N-10 below)
+
+`combine` (`:223-236`) now compares `dmarcDomain` as well as `dmarc`. Verified in both
+directions and both modes:
+
+| case | `authentication-results` | `mailgun-fields` |
+|---|---|---|
+| genuine field `dom=good.test`, forged A-R `header.from=evil.test` | quarantined `dmarc_unknown` | quarantined `dmarc_unknown` |
+| genuine field `dom=evil.test`, forged A-R `header.from=good.test` | quarantined `dmarc_unknown` | quarantined `dmarc_unknown` |
+| other names a domain, authoritative has none | `unknown` | `unknown` |
+| case difference (`GOOD.TEST` vs `good.test`, either side) | pass (correct — both sides lowercased) | pass |
+| trailing-dot FQDN `good.test.` vs `good.test` | `unknown` (over-strict, fail-closed) | `unknown` |
+| verdict disagreement `pass` vs `fail` | `unknown` | `unknown` |
+| control, fully genuine | queued | queued |
+
+Both of last pass's reproductions now quarantine in the mode where they used to be delivered.
+That is a real close. Pin: `tests/unit/mailgun-mapping.test.ts:258,275`.
+
+### N-7 — **CLOSED.** All four documents now state the current design
+
+- `README.md` §Security model (`:112-127`) — states one operator-chosen source, no fallback,
+  every ambiguity condition, the domain cross-check, **and the residual**, in that order. The
+  `or` model is gone. Test count corrected to 356 (`README.md:18`). ✅
+- `docs/decisions.md` ADR 11 (`:130-138`) — carries a "Fix pass 6 / 6b" paragraph naming
+  `INBOUND_AUTH_SOURCE`, the absent/ambiguous/present classification, the RFC 8601 parsing, the
+  verdict-OR-domain disagreement rule, and the residual. The architectural decision is now
+  recorded where an architect would look for it. ✅
+- `docs/progress.md`, `docs/security/red-team-report.md` §6 F-1 — were already correct. ✅
+
+---
+
+### New findings
+
+**N-10 (minor, `authentication-results` mode only) — the domain cross-check is one-directional, so the residual is stated slightly narrower than it is.**
+
+`combine:228-233` fires only when the *other* source names a domain. When the authoritative
+source names one and the other source is `present` but silent on the domain, there is no check:
+
+```
+payload: dmarc=pass            <-- Mailgun's synthetic verdict, no `dmarc-domain`
+message-headers: ['Authentication-Results', '<id>; dmarc=pass header.from=good.test']
+→ [authentication-results] queued, dmarc=pass, aligned against the attacker's chosen domain
+→ [mailgun-fields]         quarantined dmarc_unknown
+```
+
+Exploitability depends on an `@unverified-live` assumption — it requires Mailgun to emit
+`dmarc=pass` for a `From:` domain the sender is not authorised for, or to emit `dmarc` without
+`dmarc-domain`. Neither is known. But the consequence is a documentation over-claim that should
+be corrected now, because it is load-bearing for the mode decision: the fix note and
+`README.md:122-124` state the residual as "if Mailgun stamps none". It is actually **"if Mailgun
+stamps none, *or* stamps a verdict without an evaluated domain."** Two options — tighten the
+check (treat "authoritative has a domain, other is present and has none" as a disagreement, at
+the cost of false quarantines in the default mode if Mailgun's A-R legitimately omits
+`header.from`), or leave the code and widen the sentence. **I recommend widening the sentence
+and adding it to spike 3b's record-list** ("does the synthetic `dmarc` field ever appear without
+`dmarc-domain`?"), because the default mode is unaffected and tightening trades a hypothetical
+for a real false-positive risk.
+
+**N-9 (minor, harness).** `vitest.config.ts` sets `fileParallelism: false`, which correctly
+serialises files *within* one run — but `truncateAll()` is global and nothing prevents two
+concurrent runs against one `TEST_DATABASE_URL` from wiping each other's fixtures. I produced 4
+phantom failures this way before re-running serially. A developer with a watch mode open, or a CI
+matrix sharing one database, gets the same confusing red. A Postgres advisory lock around the
+suite, or a per-run database name, removes the footgun. Not a product defect.
+
+### Carried-forward, still open (unchanged this pass)
+
+- **C′ residual (declared, by design).** `authentication-results` mode + Mailgun stamps nothing
+  + a single forged entry naming the public authserv-id ⇒ delivered. Reproduced again; it is
+  documented in the mapper doc comment, the README, ADR 11 and the red-team report, and it is
+  precisely what spike 3c exists to settle. Not a finding — a stated precondition.
+- **N-8 (minor, stale text).** One of six fixed (`live-spikes.md`'s `INBOUND_DOMAIN` fallback
+  line). Still stale: `live-spikes.md:229` ("the F-1 kill switch, **default true**" — it is
+  `false`); `src/config.ts:154` ("`container.ts` falls back to `INBOUND_DOMAIN` when this is
+  unset" — `container.ts:190` falls back to `mailgun.org`); `.env.example:69-73` and
+  `config.ts:206` still justify the authserv-id rule with "public and guessable", a premise
+  runbook 4a corrected (the right reason is that `INBOUND_DOMAIN` is *our* domain and would
+  never match a genuine stamp); `run-and-deploy.md:97` still describes `/readyz` as
+  `{ok, db, pendingJobs}`; `tests/setup/container.ts:69` still carries `?? config.INBOUND_DOMAIN`,
+  the fallback production deleted.
+- **Spike 3c wording (minor, downgraded).** `live-spikes.md:275-277` still reads "shows TWO
+  entries naming the authserv-id **and** the pipeline quarantines" — a conjunction an operator
+  can satisfy by eye. My fix item asking for a standalone hard stop ("if it was DELIVERED rather
+  than quarantined, STOP") was not taken. This mattered a great deal last pass, because the code
+  and the operator's eye disagreed about what counts as an entry; **now that N-5 is fixed they
+  agree**, so the wording is a robustness nit rather than a trap. Still worth one sentence.
+- **N-3 (minor).** A 2xx exchange with an unreadable body is classified `PermanentError`.
+- **N-2 (minor).** `unconfirmed` deliveries are counted, logged and badged; no resend action.
+
+### Final per-AC verdict
+
+| AC | Last pass | Now | Note |
+|---|---|---|---|
+| **AC-U1** three artifacts | MET | **MET** | carried |
+| **AC-U2** flag OFF → raw Zoho link | MET w/ caveat | **MET with caveat** | carried; spike-1 hypotheses |
+| **AC-U3** flag ON → branded page | MET w/ caveat (minor) | **MET with caveat (minor)** | carried; residual is spike 4 |
+| **AC-U4** expiry enforced | MET w/ caveat | **MET with caveat** | carried |
+| **AC-R1** DMARC-fail/absent → no delivery | MET in default; **NOT MET** in `authentication-results` | **MET in the default config; MET-with-declared-residual under `authentication-results`** | N-5 and N-6 now quarantine in BOTH modes. What remains in the alternative mode is the declared C′ precondition (Mailgun stamps nothing) plus N-10's narrow extension of it. Requires an explicit operator flip; kill switch defaults off. |
+| **AC-R2** file chosen only from the token | MET | **MET** | carried; strongest surface |
+| **AC-R3** delivery to the verified From only | MET w/ caveat | **MET with caveat** | structurally airtight; "verified" inherits AC-R1 |
+| **AC-R4** ≤20 MB attach / larger Drive share | MET w/ caveat | **MET with caveat** | carried; Google account-type fork open |
+| **AC-R5** custom message + display name | MET | **MET** | carried |
+| **AC-R6** signature required | MET | **MET** | carried |
+| **AC-E1** auto-duplicate at the cap | MET w/ caveat | **MET with caveat** | carried; spike 2 |
+| **AC-E2** idempotent, serialized per (tenant, file) | MET | **MET** | carried |
+| **AC-A1** file-scoped access only | MET | **MET** | carried |
+| **AC-A2** every delivery audit-logged | MET w/ caveat (minor) | **MET with caveat (minor)** | carried; no resend action |
+| **AC-A3** tenant isolation | MET | **MET** | carried |
+
+### What is genuinely good in this pass
+
+The N-5 fix is the right fix, not the minimum one. It would have been easy to special-case the
+two forms I named in the finding; instead the parser was rewritten against the RFC's actual shape
+— comments first, then the token, then ignore the version — which is why it also survives the
+five adversarial forms I invented *after* filing the finding (comment containing `;`, nested
+parens, unbalanced paren, quoted-with-`;`, quoted-with-space). Fixing the class rather than the
+instance is the difference between a patch and engineering. The N-6 fix likewise lowercases the
+synthetic `dmarc-domain` at the source rather than at the comparison, so the case-insensitivity
+holds for every future reader of that field. And N-7 was not just patched but patched in the
+*right shape*: README and ADR 11 both now follow the property → precondition → residual template,
+which is the third time I have asked for it and the first time all four documents do it.
+
+### Plain language, for the founder
+
+Both problems I raised last time are fixed, and fixed properly. I re-ran the two attacks that beat
+the system last round and both are now blocked; then I invented five more variations of the same
+trick, and the code blocked all of those too — which tells me the fix addressed the underlying
+mistake rather than the two examples I happened to give. Genuine mail still gets through in every
+form I tried. The README and the decisions log now describe the system that actually exists, which
+is the third time I asked and the first time it is true across all four documents.
+
+**My verdict: start the live spikes.** There is nothing left blocking them, and capturing a real
+Mailgun payload is now the single highest-value thing you can do — every remaining uncertainty in
+the email gate is a question only a real payload can answer.
+
+Two small things to carry into the spikes, neither urgent. First, when you write down what the
+real payload contains, add one question to the list: does Mailgun ever report a DMARC result
+*without* naming the domain it checked? If it does, the optional mode has one more narrow gap
+than we currently describe — the default mode is unaffected either way. Second, there is a
+handful of leftover sentences in the config comments and one runbook line that describe behaviour
+that was deleted two fix passes ago. Harmless today, misleading in six months; worth ten minutes
+sometime, not now.
