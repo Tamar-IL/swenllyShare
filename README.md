@@ -153,3 +153,8 @@ window and the no-Google-account gap. Plus two forks from
   `uploadLargeFile`'s unverified, modeled-guess chunked-upload path); raise it once spike 1
   confirms that shape, or set `ZOHO_LARGE_UPLOAD_ENABLED=true` to accept the risk explicitly.
   The UX brief's "5 GB" is a placeholder pending the real Zoho plan limit.
+- **Confirm step for file requests (critic F-D).** `research/03` asks for allowlist-or-confirm;
+  the build ships the per-file allowlist and no confirm step (ADR 6). A click-to-confirm link is
+  unopenable by this product's audiences, so the only buildable variant is reply-to-confirm by
+  email (one extra round-trip per request). Decide: ship without (current), or add reply-to-confirm
+  for non-allowlisted requesters before customers.

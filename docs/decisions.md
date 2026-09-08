@@ -61,6 +61,15 @@ per-file opt-in (`allowlist_mode`, default `open`) since it is *not* redundant �
 control against "anyone holding the mailto link may fetch the file."
 **Consequence:** Stricter than the PRD requires, satisfies `research/03`'s intent without the
 UX cost of a confirm round-trip on every request.
+**Amendment (critic F-D, orchestrator, 2026-09-08):** this was a product call taken by the
+architect, and after the F-B findings it is no longer "redundant by construction" — it is a
+defense-in-depth layer the founder should decide on. It stays **not built** for a product reason
+found during review: a click-to-confirm link is unopenable by this product's own audiences
+(email-only users cannot open external links; filtered users cannot open `swenlly.com` until it
+is whitelisted). The buildable variant is **reply-to-confirm by email** (`cust-<slug>+confirm-
+<token>@`, DMARC-gated like every inbound message), which adds one email round-trip per request.
+Carried as a founder fork in README → Open questions; the per-file allowlist and the
+`INBOUND_REQUESTS_ENABLED` kill switch are the shipped controls meanwhile.
 
 ### 7. Central accounts by default; sender's-own-account is a deferred power tier
 **Context:** per-sender OAuth re-introduces the CASA question at scale and a whole-inbox blast
