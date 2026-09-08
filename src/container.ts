@@ -147,6 +147,8 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
           clientSecret: config.ZOHO_CLIENT_SECRET ?? '',
           refreshToken: config.ZOHO_REFRESH_TOKEN ?? '',
           teamFolderId: config.ZOHO_TEAM_FOLDER_ID ?? '',
+          accountsBase: config.ZOHO_ACCOUNTS_BASE,
+          linkRoleId: config.ZOHO_LINK_ROLE_ID,
         }));
 
   const driveShare: DriveSharePort =
@@ -159,6 +161,9 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
           impersonateSubject: config.GOOGLE_IMPERSONATE_SUBJECT,
           sharedDriveId: config.GOOGLE_SHARED_DRIVE_ID,
           rootFolderId: config.GOOGLE_ROOT_FOLDER_ID,
+          oauthClientId: config.GOOGLE_OAUTH_CLIENT_ID,
+          oauthClientSecret: config.GOOGLE_OAUTH_CLIENT_SECRET,
+          oauthRefreshToken: config.GOOGLE_OAUTH_REFRESH_TOKEN,
         }));
 
   const mailgunConfig = {
@@ -172,7 +177,7 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
     overrides?.inboundMail ??
     (modes.mailgun === 'fake'
       ? new FakeInboundMail(mailgunConfig.signingKey || 'dev-signing-key', clock)
-      : new MailgunInboundAdapter(mailgunConfig));
+      : new MailgunInboundAdapter(mailgunConfig, clock));
   const outboundMail: OutboundMailPort =
     overrides?.outboundMail ??
     (modes.mailgun === 'fake' ? new FakeOutboundMail() : new MailgunOutboundAdapter(mailgunConfig));

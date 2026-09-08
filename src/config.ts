@@ -93,6 +93,12 @@ export const configSchema = z.object({
   GOOGLE_IMPERSONATE_SUBJECT: z.string().optional(),
   GOOGLE_SHARED_DRIVE_ID: z.string().optional(),
   GOOGLE_ROOT_FOLDER_ID: z.string().optional(),
+  // `oauth_refresh` mode only (advisor-consult.md §4 founder-fork: no Workspace, a
+  // dedicated Gmail + production-published OAuth client). Added alongside the real
+  // adapter that consumes them — see src/adapters/google/real.ts.
+  GOOGLE_OAUTH_CLIENT_ID: z.string().optional(),
+  GOOGLE_OAUTH_CLIENT_SECRET: z.string().optional(),
+  GOOGLE_OAUTH_REFRESH_TOKEN: z.string().optional(),
 
   // --- Zoho ---
   ZOHO_CLIENT_ID: z.string().optional(),
@@ -100,6 +106,13 @@ export const configSchema = z.object({
   ZOHO_REFRESH_TOKEN: z.string().optional(),
   ZOHO_API_BASE: z.string().optional(),
   ZOHO_TEAM_FOLDER_ID: z.string().optional(),
+  // OAuth token-endpoint host — defaults to the global DC inside the adapter
+  // (accounts.zoho.com) when unset. EU/IN/AU/CN/JP data centers need their own host
+  // (architecture.md §2) — see src/adapters/zoho/real.ts.
+  ZOHO_ACCOUNTS_BASE: z.string().optional(),
+  // WorkDrive `role_id` for a created external link — community-reported default "6"
+  // (view); see src/adapters/zoho/real.ts for the full mapping and its confidence level.
+  ZOHO_LINK_ROLE_ID: z.string().default('6'),
 
   // --- Mailgun ---
   MAILGUN_API_BASE: z.string().optional(),
