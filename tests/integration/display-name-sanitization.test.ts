@@ -150,6 +150,29 @@ describe.skipIf(!hasTestDatabase())('displayName / customMessage sanitization', 
       expect(row.original_name).toBe('evil.pdf"\r\nContent-Disposition: form-data; name="x"');
     });
 
+    it('strips NUL bytes (only) from original_name so the insert never 500s, keeping everything else raw', async () => {
+      const container = buildTestContainer();
+      const { tenantId } = await signInAsNewTenant(container, 'upload-nul@example.com');
+
+      // Fix pass 4, item 3 (surfaced in fix pass 3): Postgres `text` columns cannot
+      // store a `\x00` byte at all (`invalid byte sequence for encoding "UTF8": 0x00`),
+      // and a multipart filename is entirely client-controlled — nothing upstream
+      // rejects one. `original_name` is otherwise a raw audit column (see the CR/LF
+      // test above), so only the NUL byte itself is stripped; every other control
+      // character and the CR/LF sequence must survive untouched.
+      const row = await container.services.files.createStaged({
+        tenantId,
+        stream: Readable.from(Buffer.from('hi')),
+        originalName: 'evil\x00.pdf"\r\nContent-Disposition: form-data; name="x"',
+        mime: 'application/pdf',
+      });
+
+      expect(row.original_name).toBe('evil.pdf"\r\nContent-Disposition: form-data; name="x"');
+      expect(row.original_name).not.toMatch(/\x00/);
+      // display_name goes through the broader sanitizer regardless — unaffected by this fix.
+      expect(row.display_name).toBe('evil.pdf"Content-Disposition: form-data; name="x"');
+    });
+
     it('truncates a display name over 255 characters rather than failing the upload', async () => {
       const container = buildTestContainer();
       const { tenantId } = await signInAsNewTenant(container, 'upload-long@example.com');
@@ -168,10 +191,9 @@ describe.skipIf(!hasTestDatabase())('displayName / customMessage sanitization', 
       const container = buildTestContainer();
       const { tenantId } = await signInAsNewTenant(container, 'upload-allcontrol@example.com');
 
-      // No NUL byte here deliberately: `original_name` is stored verbatim (see the test
-      // above) and Postgres `text` columns cannot hold one at all, independent of this
-      // fix — a pre-existing gap outside findings #5/#6's scope, called out in the fix
-      // report rather than patched here.
+      // No NUL byte here: this test is about the all-control-characters fallback for
+      // display_name, a separate case from NUL-stripping in original_name (covered by
+      // its own test above, fix pass 4 item 3).
       const row = await container.services.files.createStaged({
         tenantId,
         stream: Readable.from(Buffer.from('hi')),

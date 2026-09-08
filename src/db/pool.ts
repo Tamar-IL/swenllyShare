@@ -1,6 +1,11 @@
 import pg from 'pg';
 
 const { Pool } = pg;
+/** Re-exported so callers outside the three `pg`-importing locations (architecture.md
+ * §2's boundary rule 3, enforced by `eslint.config.js`) never need their own `import
+ * type pg from 'pg'` just to type a `pool`/`client` field or parameter — `db/pool.ts`
+ * is the one place that concrete type comes from. */
+export type Pool = pg.Pool;
 export type PoolClient = pg.PoolClient;
 export type Queryable = Pick<pg.Pool, 'query'> | Pick<pg.PoolClient, 'query'>;
 

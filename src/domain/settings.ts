@@ -1,7 +1,6 @@
-import type pg from 'pg';
+import { withTransaction, type Pool } from '../db/pool.js';
 import { files, type FileRow, type AllowlistMode } from '../db/repositories/files.js';
 import { fileAllowlist } from '../db/repositories/file-allowlist.js';
-import { withTransaction } from '../db/pool.js';
 import type { Clock } from '../ports/clock.js';
 import { AppError, ErrorCode } from '../lib/errors.js';
 
@@ -55,7 +54,7 @@ function validatePattern(pattern: string): string {
  */
 export class SettingsService {
   constructor(
-    private readonly pool: pg.Pool,
+    private readonly pool: Pool,
     private readonly config: SettingsConfig,
   ) {}
 

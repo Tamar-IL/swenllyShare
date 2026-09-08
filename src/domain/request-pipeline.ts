@@ -1,5 +1,4 @@
-import type pg from 'pg';
-import { withTransaction } from '../db/pool.js';
+import { withTransaction, type Pool } from '../db/pool.js';
 import { deliveries } from '../db/repositories/deliveries.js';
 import { fileAllowlist } from '../db/repositories/file-allowlist.js';
 import { files } from '../db/repositories/files.js';
@@ -40,7 +39,7 @@ const QUARANTINE_CAP_WINDOW_MINUTES = 60;
  */
 export class RequestPipeline {
   constructor(
-    private readonly pool: pg.Pool,
+    private readonly pool: Pool,
     private readonly ports: { inboundMail: InboundMailPort; clock: Clock },
     private readonly rateLimit: RateLimitService,
     private readonly config: RequestPipelineConfig,

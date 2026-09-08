@@ -1,5 +1,4 @@
-import type pg from 'pg';
-import { withAdvisoryLock, withTransaction } from '../db/pool.js';
+import { withAdvisoryLock, withTransaction, type Pool, type PoolClient } from '../db/pool.js';
 import { driveCopies, type DriveCopyRow } from '../db/repositories/drive-copies.js';
 import type { DriveSharePort } from '../ports/drive-share.js';
 import type { Clock } from '../ports/clock.js';
@@ -43,7 +42,7 @@ export interface SharingEngineConfig {
  */
 export class SharingEngine {
   constructor(
-    private readonly pool: pg.Pool,
+    private readonly pool: Pool,
     private readonly driveShare: DriveSharePort,
     private readonly clock: Clock,
     private readonly config: SharingEngineConfig,
@@ -142,7 +141,7 @@ export class SharingEngine {
    * lost lock safe.
    */
   private async provision(
-    client: pg.PoolClient,
+    client: PoolClient,
     tenantId: string,
     fileId: string,
     seq: number,

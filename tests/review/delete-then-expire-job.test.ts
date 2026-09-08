@@ -7,21 +7,24 @@ import { runPendingJobs } from '../../src/jobs/queue.js';
 import { files } from '../../src/db/repositories/files.js';
 
 /**
- * CODE REVIEW — verifying a suspected bug: `Files.deleteFile` never cancels the
- * already-scheduled `file.expire` job (`jobs.scheduleExpire`, keyed `expire:<fileId>`,
- * set at file-creation time from `expires_at`). When that job later fires on its own
- * schedule, `handleFileExpire` (src/jobs/handlers/file-expire.ts) unconditionally sets
+ * CODE REVIEW finding 1a (docs/reviews/code-review.md), now fixed and kept as a
+ * regression test: `Files.deleteFile` used to never cancel the already-scheduled
+ * `file.expire` job (`jobs.scheduleExpire`, keyed `expire:<fileId>`, set at
+ * file-creation time from `expires_at`). When that job later fired on its own schedule,
+ * `handleFileExpire` (src/jobs/handlers/file-expire.ts) unconditionally set
  * `status = 'expired'` with no check of the file's CURRENT status — clobbering a sender's
  * earlier, deliberate delete back to a live-looking 'expired' pill, in violation of
  * architecture.md §7 ("Delete = immediate expiry + blob removal ... object deletion") and
- * §3 invariant 5.
+ * §3 invariant 5. Fix pass 4: `deleteFile` now cancels the `expire:<fileId>` job in the
+ * same transaction as `markDeleted` (`jobs.cancelByDedupeKey`), and `handleFileExpire`
+ * also no-ops on an already-deleted file as a second line of defense.
  */
 describe.skipIf(!hasTestDatabase())('REVIEW: delete then a stale file.expire job', () => {
   beforeEach(async () => {
     await truncateAll();
   });
 
-  it.fails('a deleted file must not be flipped to expired by a stale file.expire job', async () => {
+  it('a deleted file must not be flipped to expired by a stale file.expire job', async () => {
     const container = buildTestContainer();
     const { tenantId } = await signInAsNewTenant(container, 'del-then-expire@example.com');
 

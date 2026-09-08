@@ -1,4 +1,4 @@
-import type pg from 'pg';
+import type { Pool } from '../db/pool.js';
 import { deliveries, type DeliveryRow } from '../db/repositories/deliveries.js';
 
 /**
@@ -7,7 +7,7 @@ import { deliveries, type DeliveryRow } from '../db/repositories/deliveries.js';
  * service is the read side.
  */
 export class AuditService {
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(private readonly pool: Pool) {}
 
   async listForFile(
     tenantId: string,
@@ -19,5 +19,12 @@ export class AuditService {
       deliveries.countForFile(this.pool, tenantId, fileId),
     ]);
     return { items, total };
+  }
+
+  /** Boundary rule 1 (architecture.md §2): the `/files` list page's "נשלח ל-N" mini
+   * delivery count, wrapped here so `src/http/routes/files.ts` doesn't need its own
+   * `deliveries` repository import. */
+  async countsSentByTenant(tenantId: string): Promise<Map<string, number>> {
+    return deliveries.countsSentByTenant(this.pool, tenantId);
   }
 }

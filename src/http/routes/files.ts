@@ -1,13 +1,10 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Container } from '../../container.js';
-import { files } from '../../db/repositories/files.js';
-import { tenants } from '../../db/repositories/tenants.js';
-import { deliveries } from '../../db/repositories/deliveries.js';
 import { requireSessionHtml } from '../plugins/auth.js';
 import { issueCsrfToken } from '../plugins/csrf.js';
 import { AppError, ErrorCode } from '../../lib/errors.js';
 import { buildRequestAddress } from '../../lib/addressing.js';
-import type { AllowlistMode } from '../../db/repositories/files.js';
+import type { AllowlistMode } from '../../domain/files.js';
 import type { ExpiryMode } from '../../domain/settings.js';
 import {
   computeDisplayStatus,
@@ -57,8 +54,8 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
       if (!request.tenantId) return; // requireSessionHtml already redirected
       const now = container.ports.clock.now();
       const [rows, sentCounts, csrfToken] = await Promise.all([
-        files.list(container.pool, request.tenantId),
-        deliveries.countsSentByTenant(container.pool, request.tenantId),
+        container.services.files.list(request.tenantId),
+        container.services.audit.countsSentByTenant(request.tenantId),
         issueCsrfToken(reply),
       ]);
       const flash = request.query.flash ? FLASH_MESSAGES[request.query.flash] : undefined;
@@ -101,12 +98,12 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
     { preHandler: requireSessionHtml },
     async (request, reply) => {
       if (!request.tenantId) return;
-      const file = await files.findById(container.pool, request.tenantId, request.params.id);
+      const file = await container.services.files.getById(request.tenantId, request.params.id);
       if (!file) return renderNotFound(reply);
 
       const now = container.ports.clock.now();
       const [tenant, allowlist, deliveriesResult, csrfToken] = await Promise.all([
-        tenants.findById(container.pool, request.tenantId),
+        container.services.auth.getTenantById(request.tenantId),
         container.services.settings.getAllowlist(request.tenantId, file.id),
         container.services.audit.listForFile(request.tenantId, file.id),
         issueCsrfToken(reply),

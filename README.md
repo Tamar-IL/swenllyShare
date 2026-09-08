@@ -96,9 +96,10 @@ required, 32+ chars · `COOKIE_SECURE` derived from `NODE_ENV` · `ADAPTERS`=fak
 **Providers** — `GOOGLE_CREDENTIAL_MODE`=service_account|oauth_refresh + SA/OAuth vars (Workspace SA
 or no-Workspace fallback) · `ZOHO_CLIENT_ID`/`_SECRET`/`_REFRESH_TOKEN`, `ZOHO_API_BASE`/
 `_ACCOUNTS_BASE`, `ZOHO_TEAM_FOLDER_ID`, `ZOHO_LINK_ROLE_ID`=6 (WorkDrive OAuth + DC host + folder
-+ link role) · `MAILGUN_API_BASE`/`_API_KEY`/`_SIGNING_KEY`/`_SENDING_DOMAIN`, `OUTBOUND_FROM` ·
-`MAILGUN_AUTHSERV_ID` (defaults to `INBOUND_DOMAIN` — a guess until spike 3),
-`INBOUND_AUTH_SOURCE`=both (which source(s) the DMARC mapper trusts).
+
+- link role) · `MAILGUN_API_BASE`/`_API_KEY`/`_SIGNING_KEY`/`_SENDING_DOMAIN`, `OUTBOUND_FROM` ·
+  `MAILGUN_AUTHSERV_ID` (defaults to `INBOUND_DOMAIN` — a guess until spike 3),
+  `INBOUND_AUTH_SOURCE`=both (which source(s) the DMARC mapper trusts).
 
 **Flags** — `BRANDED_PAGE_ENABLED`=false (branded page vs. raw Zoho link; `/s/*` 404s while off) ·
 `WORKER_ENABLED`=true · `INBOUND_REQUESTS_ENABLED`=true (kill switch — `false` quarantines inbound

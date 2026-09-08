@@ -1,4 +1,4 @@
-import type pg from 'pg';
+import type { Pool } from '../db/pool.js';
 import { rateLimits } from '../db/repositories/rate-limits.js';
 import { addressDomain } from '../lib/email-address.js';
 
@@ -69,7 +69,7 @@ function normalizeRequesterBucketKey(address: string): string {
  */
 export class RateLimitService {
   constructor(
-    private readonly pool: pg.Pool,
+    private readonly pool: Pool,
     private readonly config: RateLimitConfig,
   ) {}
 

@@ -1,6 +1,5 @@
 import type { FastifyInstance } from 'fastify';
 import type { Container } from '../../container.js';
-import { jobs } from '../../db/repositories/jobs.js';
 import { PERIODIC_SWEEP_INTERVAL_MINUTES } from '../../jobs/queue.js';
 
 // F-5: how stale a sweep kind's most recent scheduling can be before /readyz calls it
@@ -15,7 +14,7 @@ export function registerHealthRoutes(app: FastifyInstance, container: Container)
   app.get('/readyz', async (_request, reply) => {
     try {
       await container.pool.query('SELECT 1');
-      const pendingJobs = await jobs.countPending(container.pool);
+      const pendingJobs = await container.services.health.countPendingJobs();
 
       // F-5 (docs/security/red-team-report.md, RT-50..RT-54): a handler that's never
       // scheduled isn't a control — this surfaces "the recurring sweeps are actually
@@ -26,7 +25,7 @@ export function registerHealthRoutes(app: FastifyInstance, container: Container)
       const sweeps: Record<string, { lastScheduledAt: string | null; healthy: boolean }> = {};
       let sweepsHealthy = true;
       for (const kind of SWEEP_KINDS) {
-        const lastScheduledAt = await jobs.mostRecentScheduledAt(container.pool, kind);
+        const lastScheduledAt = await container.services.health.mostRecentScheduledAt(kind);
         const healthy = lastScheduledAt !== null && now - lastScheduledAt.getTime() <= staleAfterMs;
         sweeps[kind] = { lastScheduledAt: lastScheduledAt?.toISOString() ?? null, healthy };
         if (!healthy) sweepsHealthy = false;

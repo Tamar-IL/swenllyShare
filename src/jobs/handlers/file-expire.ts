@@ -21,6 +21,18 @@ export async function handleFileExpire(
   const file = await files.findById(container.pool, tenantId, fileId);
   if (!file) return { status: 'done' };
 
+  // Code review finding 1/4 (docs/reviews/code-review.md): a sender's `deleteFile`
+  // already cancels this job's schedule (`jobs.cancelByDedupeKey`), but a job already
+  // claimed `processing` an instant before that transaction commits can still reach
+  // here. Belt-and-braces: never let an expiry downgrade an already-deleted file back
+  // to `expired`, and skip the external revoke calls too — `deleteFile` already
+  // best-effort-revoked the same Zoho link/Drive copies, so a second call here would
+  // just be a wasted (and possibly erroring) retry against resources already gone.
+  if (file.status === 'deleted') {
+    console.log(`file.expire: file ${fileId} (tenant ${tenantId}) already deleted, no-op`);
+    return { status: 'done' };
+  }
+
   if (file.zoho_link_id) {
     await container.ports.fileStore.revokeLink(file.zoho_link_id);
   }

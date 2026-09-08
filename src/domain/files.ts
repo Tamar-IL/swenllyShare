@@ -1,6 +1,6 @@
 import type { Readable } from 'node:stream';
-import type pg from 'pg';
-import { files, type FileRow } from '../db/repositories/files.js';
+import { withTransaction, type Pool } from '../db/pool.js';
+import { files, type FileRow, type AllowlistMode } from '../db/repositories/files.js';
 import { driveCopies } from '../db/repositories/drive-copies.js';
 import { jobs } from '../db/repositories/jobs.js';
 import type { FileStorePort } from '../ports/file-store.js';
@@ -66,6 +66,27 @@ function sanitizeInitialDisplayName(rawFilename: string): string {
   return capped === '' ? FALLBACK_DISPLAY_NAME : capped;
 }
 
+/**
+ * Strips NUL bytes only, leaving `original_name` otherwise byte-for-byte raw (fix pass
+ * 4, surfaced in fix pass 3): unlike `display_name`, this column is a pure audit trail
+ * (never echoed into a header, subject, or filename) and is deliberately NOT run through
+ * `sanitizeInitialDisplayName`'s broader control-character stripping. But Postgres's
+ * `text` type physically cannot store a `\x00` byte (`invalid byte sequence for encoding
+ * "UTF8": 0x00`), so a filename containing one — trivial for a client to send, since
+ * `multipart` filenames are client-controlled and never validated by the browser — 500s
+ * on `files.create`'s INSERT with no user-facing explanation. NUL is the one byte that
+ * must go; everything else about the raw name (other control chars, path separators,
+ * length) is preserved verbatim.
+ */
+function stripNulBytes(rawFilename: string): string {
+  return rawFilename.replace(/\x00/g, '');
+}
+
+/** Re-exported so `src/http/routes/files.ts` (which may not import
+ * `db/repositories/**` directly, architecture.md §2 boundary rule 1) can still name this
+ * type for its settings-form body. */
+export type { AllowlistMode };
+
 export interface FileStatusView {
   status: FileRow['status'];
   publishStep: string;
@@ -79,7 +100,7 @@ export interface FileStatusView {
  */
 export class FilesService {
   constructor(
-    private readonly pool: pg.Pool,
+    private readonly pool: Pool,
     private readonly ports: {
       fileStore: FileStorePort;
       driveShare: DriveSharePort;
@@ -136,7 +157,7 @@ export class FilesService {
     const row = await files.create(this.pool, {
       tenantId: params.tenantId,
       displayName: sanitizeInitialDisplayName(params.originalName),
-      originalName: params.originalName,
+      originalName: stripNulBytes(params.originalName),
       sizeBytes: bytes,
       mime: normalizeMime(params.mime),
       requestToken,
@@ -152,6 +173,28 @@ export class FilesService {
     });
 
     return row;
+  }
+
+  /**
+   * Boundary rule 1 (architecture.md §2, `eslint.config.js`): HTTP handlers may not
+   * query repositories directly — these three thin read wrappers (`list`, `getById`,
+   * `resolveBySlug`) are what `src/http/routes/files.ts` and `public-share.ts` now call
+   * instead of `files.list`/`files.findById`/`files.resolveBySlug` straight from the
+   * route. No behavior change, just the call going through the domain service that owns
+   * this table's lifecycle.
+   */
+  async list(tenantId: string, opts: { limit?: number } = {}): Promise<FileRow[]> {
+    return files.list(this.pool, tenantId, opts);
+  }
+
+  async getById(tenantId: string, fileId: string): Promise<FileRow | undefined> {
+    return files.findById(this.pool, tenantId, fileId);
+  }
+
+  /** Cross-tenant resolver #2 (architecture.md §3 invariant 1) — the branded page's
+   * slug lookup (`GET /s/:slug`), which by definition has no tenant to scope by yet. */
+  async resolveBySlug(publicSlug: string): Promise<FileRow | undefined> {
+    return files.resolveBySlug(this.pool, publicSlug);
   }
 
   async getStatus(tenantId: string, fileId: string): Promise<FileStatusView | undefined> {
@@ -184,6 +227,17 @@ export class FilesService {
     let file = await files.findById(this.pool, tenantId, fileId);
     if (!file) throw new AppError(ErrorCode.NOT_FOUND, 404, `file ${fileId} not found`);
     if (file.status === 'ready') return file;
+    // Code review finding 1/4 (docs/reviews/code-review.md): `deleteFile` cancels this
+    // job in the same transaction as `markDeleted`, but a job already claimed
+    // `processing` an instant before that commit can still reach here — its staged blob
+    // is gone (`deleteFile` already removed it), so without this guard every step-1
+    // `blobStaging.open` below would throw, eventually dead-lettering the job and (before
+    // this fix) clobbering `deleted` back to `failed`. Nothing is left to publish, so
+    // this is a no-op that completes the job rather than a failure that retries it.
+    if (file.status === 'deleted') {
+      console.log(`file.publish: file ${fileId} (tenant ${tenantId}) already deleted, no-op`);
+      return file;
+    }
     if (!file.staging_blob_id) {
       throw new Error(`file ${fileId} has no staged blob to publish from`);
     }
@@ -277,6 +331,23 @@ export class FilesService {
         await this.ports.driveShare.delete(copy.drive_file_id).catch(() => {});
       }
     }
-    return files.markDeleted(this.pool, tenantId, fileId);
+
+    // Code review finding 1 (docs/reviews/code-review.md): a delete must be terminal —
+    // cancel every still-actionable lifecycle job for this file in the SAME transaction
+    // as markDeleted, so neither a stale `file.expire` (scheduled back at create/
+    // updateSettings time for the file's original expiry) nor a `file.publish` still
+    // in flight (dead-lettering because the staging blob it needs was just removed
+    // above) can resurrect the row into `expired`/`failed` after this commits. Both
+    // dedupe keys are deterministic (`files.create`/`updateSettings` and
+    // `createStaged` respectively), so no extra lookup is needed. Belt-and-braces:
+    // `handleFileExpire`, `handleFilePublish`, and `runDeadLetterHook` also no-op on a
+    // file already `status = 'deleted'`, closing the window for any job kind this
+    // cancellation missed (e.g. one already claimed `processing` by a worker the
+    // instant before this transaction commits).
+    return withTransaction(this.pool, async (client) => {
+      await jobs.cancelByDedupeKey(client, `expire:${fileId}`);
+      await jobs.cancelByDedupeKey(client, `file.publish:${fileId}`);
+      return files.markDeleted(client, tenantId, fileId);
+    });
   }
 }

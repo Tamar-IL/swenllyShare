@@ -23,6 +23,15 @@ backend-engineer pass) — not evaluated or touched here. Nothing in `src/**` wa
 this review; the 3 pins above are reproducible in isolation
 (`vitest run --project integration tests/review`) independent of that contention.**
 
+> **Fix status (fix pass 4, backend-engineer): FIXED.** The NUL-byte 500 flagged above
+> (`display-name-sanitization.test.ts`'s stable failure) was `original_name`, not
+> `display_name` — Postgres `text` columns cannot store a `\x00` byte at all, and
+> `original_name` is an intentionally-raw audit column (unlike `display_name`, which
+> already strips control characters, NUL included). `FilesService.createStaged`
+> (`src/domain/files.ts`) now strips NUL bytes only from `original_name` before the
+> insert, leaving it otherwise byte-for-byte raw. Covered by a new test in
+> `tests/integration/display-name-sanitization.test.ts`.
+
 ---
 
 ## Must-fix (verified)
@@ -74,6 +83,20 @@ also have `handleFileExpire` and `runDeadLetterHook`'s `file.publish` branch re-
 file and no-op (or at least not downgrade) when `status === 'deleted'` — cheap, and closes
 the window for any *other* job kind that later touches `status` the same way.
 
+> **Fix status (fix pass 4, backend-engineer): FIXED.** `Files.deleteFile`
+> (`src/domain/files.ts`) now cancels both the `expire:<fileId>` and
+> `file.publish:<fileId>` jobs in the same transaction as `markDeleted`, via a new
+> general-purpose `jobs.cancelByDedupeKey` repository method
+> (`src/db/repositories/jobs.ts`) — `scheduleExpire`'s own cancel branch was refactored
+> to call it too, instead of duplicating the SQL. Belt-and-braces guards were added
+> exactly where suggested: `handleFileExpire` (`src/jobs/handlers/file-expire.ts`) and
+> `Files.publishFile` (`src/domain/files.ts`, the crash-safe step machine
+> `handleFilePublish` drives) both no-op on `status === 'deleted'`, and
+> `runDeadLetterHook`'s `file.publish` branch (`src/jobs/queue.ts`) re-reads the file and
+> skips the `status='failed'` write for the same case. `tests/review/delete-then-expire-job.test.ts`
+> and `tests/review/delete-during-publish.test.ts` are flipped from `it.fails` to `it` and
+> pass.
+
 ---
 
 ### 2. [HIGH] `delivery.fulfill`'s "sending" crash-recovery assumes the crash always happens *after* the physical send — it doesn't
@@ -114,6 +137,27 @@ so the retry path can tell the two cases apart instead of conflating them. (a) i
 smaller change and matches the existing `revertSendingToQueued` pattern already in
 `delivery-fulfillment.ts`.
 
+> **Fix status (fix pass 4, backend-engineer): FIXED**, via option (b) rather than (a) —
+> a real two-step CAS instead of a revert-on-catch, so the states are distinguishable
+> by construction rather than by an error-handling window that's easy to get subtly
+> wrong. `deliveries.outcome` gained a second value, `dispatching` (migration
+> `0003_delivery_dispatching_state.sql`): `queued → sending` (`markSending`, unchanged —
+> before any local work) `→ dispatching` (new `deliveryFulfillment.markDispatching`, set
+> immediately before the actual `outboundMail.send`/`SharingEngine.share` call) `→ sent`.
+> A retry finding `sending` now redoes the whole delivery from scratch (re-running the
+> F-4 gates too, since time has passed); only `dispatching` is finalized `sent` without
+> resending (`reason: 'ack_lost'`), which is RT-13's exact scenario and still passes.
+> One residual, documented gap: for the Drive-share path, `markDispatching` is set
+> before calling `SharingEngine.share(...)` as a whole, not at the exact instant
+> `sharePermission` fires inside it — `share()`'s own local, in-process reserve
+> transaction runs first. Narrowing further would mean threading a callback through
+> `SharingEngine`, out of scope for this pass; flagged in
+> `src/jobs/handlers/delivery-fulfill.ts`'s doc comment rather than silently accepted.
+> `tests/review/delivery-fulfill-sending-crash.test.ts` is flipped from `it.fails` to
+> `it` and passes (its own flaky-port test double had an unrelated bug — spreading a
+> class instance with `{...real}` drops prototype methods — fixed alongside). RT-13
+> (`tests/redteam/delivery-toctou.test.ts`) still passes unmodified.
+
 ---
 
 ## Should-fix (verified, lower severity / defense-in-depth)
@@ -136,6 +180,33 @@ no CI signal, only a code-review catch. Cheap to close:
 ```
 scoped via `overrides` to `src/domain/**` and `src/http/**`.
 
+> **Fix status (fix pass 4, backend-engineer): FIXED.** `eslint.config.js` now has three
+> `no-restricted-imports` blocks: `src/domain/**` may not import `**/adapters/**`,
+> `**/http/**`, `**/jobs/**`, or the `pg` package; `src/http/**` may not import
+> `**/db/repositories/**` or `**/adapters/**`; and everywhere else (excluding
+> `src/db/repositories/**`, `src/db/pool.ts`, `src/db/migrate.ts`) may not import `pg`
+> either — closing the gap this finding flagged (`container.ts` and all seven domain
+> services were importing `pg` directly for the `pg.Pool`/`pg.PoolClient` types; fixed by
+> re-exporting `Pool`/`PoolClient` type aliases from `src/db/pool.ts` instead of
+> loosening the rule). `pnpm lint` is clean at HEAD; verified the rules actually fire (not
+> just silently absent) by temporarily reintroducing one violation of each kind and
+> confirming ESLint caught all four, then reverting. `architecture.md` §2's sentence now
+> names the mechanism instead of just claiming it exists.
+>
+> This pass also closed the two *existing* violations the review's own grep missed
+> (grepping only for `from '../adapters` under `src/domain/` doesn't catch `src/http/**`
+> importing `src/db/repositories/**`, which three routes were doing):
+> `src/http/routes/files.ts` (`files`, `tenants`, `deliveries` repositories) and
+> `src/http/routes/public-share.ts` (`files.resolveBySlug`) now call new thin read
+> wrappers (`FilesService.list/getById/resolveBySlug`, `AuditService.countsSentByTenant`,
+> `AuthService.getTenantById`) instead. `src/http/routes/health.ts`'s two `jobs`
+> repository calls now go through a new `HealthService` domain service; its bare
+> `container.pool.query('SELECT 1')` liveness ping was left as-is, matching this review's
+> own assessment that it isn't business logic worth routing through a repository, and
+> because none of the four `no-restricted-imports` blocks above catch a raw `.query()`
+> call on an already-injected pool (only import-based violations are in scope for a lint
+> rule of this shape).
+
 ### 4. Minor: `handleFileExpire` re-runs external revoke calls on an already-deleted resource without guarding against it
 
 Even setting aside finding 1, if a `file.expire` job fires after a sender already called
@@ -146,6 +217,11 @@ adapters will very likely 404/error on those (unverified — no live calls made 
 `docs/verification-ledger.md`), which is at worst wasted retries into the dead-letter queue,
 but is worth folding into the finding-1 fix (a `status === 'deleted'` short-circuit at the
 top of `handleFileExpire` fixes both this and 1a in one place).
+
+> **Fix status (fix pass 4, backend-engineer): FIXED**, folded into finding 1's fix as
+> suggested — `handleFileExpire`'s `status === 'deleted'` guard sits before the
+> `fileStore.revokeLink` call and the `drive.revoke` enqueue loop, so neither runs
+> against a resource `deleteFile` already best-effort-cleaned-up.
 
 ---
 
@@ -214,3 +290,19 @@ status — not security-exploitable by a third party, but exactly the class of b
 trust in "the deliveries log is the source of truth"). Everything else — including all of
 `sharing-engine.ts`, tenant isolation, and the inbound pipeline's gate ordering — is solid
 and does not block. Fix 3 (lint rule) is cheap and should ride along; fix 4 folds into fix 1.
+
+---
+
+## Fix pass 4 status (backend-engineer)
+
+All four findings above, plus the NUL-byte `original_name` 500 flagged in this review's
+own intro as a stable-but-excluded failure, are **FIXED** — see the fix-status note
+inline under each finding for specifics (files touched, migrations added, residual gaps
+called out where one remains). All three `tests/review/**` pins are flipped from
+`it.fails` to `it` and pass, alongside RT-13 (unmodified) and the full existing suite.
+Two migrations were added: `0003_delivery_dispatching_state.sql` (finding 2's
+`dispatching` outcome value). `pnpm typecheck && pnpm lint && pnpm exec prettier --check .
+&& pnpm test && pnpm gen:ledger -- --check` is green except `prettier --check` on
+`README.md`, which fails at HEAD independent of this pass (untouched by this fix pass,
+owned by the concurrent technical-writer session per `CLAUDE.md`) — flagging rather than
+fixing it, since it's out of this pass's scope.

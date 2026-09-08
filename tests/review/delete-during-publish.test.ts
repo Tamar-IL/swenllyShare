@@ -7,20 +7,25 @@ import { runPendingJobs, JOB_KINDS } from '../../src/jobs/queue.js';
 import { files } from '../../src/db/repositories/files.js';
 
 /**
- * CODE REVIEW — verifying a suspected bug: deleting a file while its `file.publish` job
- * is still in flight (staging blob already removed by `Files.deleteFile`) causes the job
- * to keep failing (staged blob gone) until it dead-letters, at which point
- * `runDeadLetterHook` unconditionally sets `status='failed'` — silently resurrecting a
- * file the sender explicitly deleted, in violation of architecture.md §3 invariant 5
- * ("Files are never hard-deleted by expiry — access is revoked; status gates every read
- * path") and §7 ("Delete = immediate expiry + blob removal ... object deletion").
+ * CODE REVIEW finding 1b (docs/reviews/code-review.md), now fixed and kept as a
+ * regression test: deleting a file while its `file.publish` job was still in flight
+ * (staging blob already removed by `Files.deleteFile`) used to make the job keep
+ * failing (staged blob gone) until it dead-lettered, at which point `runDeadLetterHook`
+ * unconditionally set `status='failed'` — silently resurrecting a file the sender
+ * explicitly deleted, in violation of architecture.md §3 invariant 5 ("Files are never
+ * hard-deleted by expiry — access is revoked; status gates every read path") and §7
+ * ("Delete = immediate expiry + blob removal ... object deletion"). Fix pass 4:
+ * `deleteFile` now cancels the `file.publish:<fileId>` job in the same transaction as
+ * `markDeleted`; `Files.publishFile` and `runDeadLetterHook` also no-op on an
+ * already-deleted file as a second line of defense (covers a job already claimed
+ * `processing` an instant before that transaction commits).
  */
 describe.skipIf(!hasTestDatabase())('REVIEW: delete during file.publish', () => {
   beforeEach(async () => {
     await truncateAll();
   });
 
-  it.fails('a deleted file must not come back as status=failed', async () => {
+  it('a deleted file must not come back as status=failed', async () => {
     const container = buildTestContainer();
     const { tenantId } = await signInAsNewTenant(container, 'del-during-publish@example.com');
 

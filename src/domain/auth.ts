@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type pg from 'pg';
+import type { Pool } from '../db/pool.js';
 import { magicLinks } from '../db/repositories/magic-links.js';
 import { rateLimits } from '../db/repositories/rate-limits.js';
 import { sessions, type SessionRow } from '../db/repositories/sessions.js';
@@ -43,7 +43,7 @@ function sha256Hex(input: string): string {
  */
 export class AuthService {
   constructor(
-    private readonly pool: pg.Pool,
+    private readonly pool: Pool,
     private readonly ports: { tokenGen: TokenGen; clock: Clock; outboundMail: OutboundMailPort },
     private readonly config: AuthServiceConfig,
   ) {}
@@ -143,5 +143,12 @@ export class AuthService {
 
   async destroySession(sessionId: string): Promise<void> {
     await sessions.destroy(this.pool, sessionId);
+  }
+
+  /** Boundary rule 1 (architecture.md §2): the file-detail page's tenant lookup (for its
+   * mailto/slug rendering), wrapped here so `src/http/routes/files.ts` doesn't need its
+   * own `tenants` repository import — `AuthService` already owns tenant lifecycle. */
+  async getTenantById(tenantId: string): Promise<TenantRow | undefined> {
+    return tenants.findById(this.pool, tenantId);
   }
 }

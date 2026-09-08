@@ -1,4 +1,4 @@
-import type pg from 'pg';
+import type { Pool } from './db/pool.js';
 import type { Config } from './config.js';
 import type { FileStorePort } from './ports/file-store.js';
 import type { DriveSharePort } from './ports/drive-share.js';
@@ -25,6 +25,7 @@ import { RequestPipeline } from './domain/request-pipeline.js';
 import { SharingEngine } from './domain/sharing-engine.js';
 import { AuditService } from './domain/audit.js';
 import { RateLimitService } from './domain/rate-limit.js';
+import { HealthService } from './domain/health.js';
 
 export interface Ports {
   fileStore: FileStorePort;
@@ -45,11 +46,12 @@ export interface Services {
   sharingEngine: SharingEngine;
   audit: AuditService;
   rateLimit: RateLimitService;
+  health: HealthService;
 }
 
 export interface Container {
   config: Config;
-  pool: pg.Pool;
+  pool: Pool;
   ports: Ports;
   services: Services;
 }
@@ -101,7 +103,7 @@ function resolveMode(
 
 export interface BuildContainerOptions {
   config: Config;
-  pool: pg.Pool;
+  pool: Pool;
   /** Test-only escape hatch: substitute a specific port instance (e.g. a `FakeClock` with
    * virtual time) after the normal ADAPTERS-driven construction. Never used by `server.ts`. */
   overrides?: Partial<Ports>;
@@ -251,6 +253,7 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
     }),
     audit: new AuditService(pool),
     rateLimit,
+    health: new HealthService(pool),
   };
 
   return { config, pool, ports, services };

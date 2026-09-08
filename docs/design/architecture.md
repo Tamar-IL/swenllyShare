@@ -85,7 +85,9 @@ and per-repository.
                  └──────────────────────────────────────────────────────────────────────┘
 ```
 
-**Boundary rules (enforced by review + a lint rule per direction):**
+**Boundary rules (enforced by review + a `no-restricted-imports` block per direction in
+`eslint.config.js`, one per rule below plus a fourth restricting `pg` itself to the three
+locations named in rule 3 — fix pass 4, code review finding 3):**
 1. HTTP handlers contain no business logic and no SQL. They parse, authorize, call one domain
    service, render.
 2. Domain services never import an adapter — only a port interface, injected by `container.ts`.

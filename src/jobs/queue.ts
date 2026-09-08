@@ -69,6 +69,20 @@ async function runDeadLetterHook(container: Container, job: JobRow): Promise<voi
     const tenantId = String(payload.tenantId ?? '');
     const fileId = String(payload.fileId ?? '');
     if (tenantId && fileId) {
+      // Code review finding 1/4 (docs/reviews/code-review.md): `handleFilePublish`'s own
+      // `status === 'deleted'` guard (src/domain/files.ts publishFile) should already
+      // stop this from ever dead-lettering going forward, but this hook re-reads the
+      // file and no-ops anyway as the belt-and-braces of last resort — e.g. a job that
+      // was already deep into its retry count before this fix shipped, or any other
+      // future job kind reusing this hook's shape. Never downgrade an already-deleted
+      // file back to `failed`.
+      const file = await files.findById(container.pool, tenantId, fileId);
+      if (file?.status === 'deleted') {
+        console.log(
+          `file.publish dead-letter hook: file ${fileId} (tenant ${tenantId}) already deleted, no-op`,
+        );
+        return;
+      }
       await files.setPublishStep(container.pool, tenantId, fileId, { status: 'failed' });
     }
     return;

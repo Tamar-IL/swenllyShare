@@ -17,6 +17,7 @@ describe.skipIf(!hasTestDatabase())('migrate (idempotency)', () => {
     expect(rows.map((r) => r.filename)).toEqual([
       '0001_init.sql',
       '0002_delivery_sending_state.sql',
+      '0003_delivery_dispatching_state.sql',
     ]);
   });
 

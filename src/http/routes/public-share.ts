@@ -1,6 +1,5 @@
 import type { FastifyInstance } from 'fastify';
 import type { Container } from '../../container.js';
-import { files } from '../../db/repositories/files.js';
 import { contentDispositionAttachment } from '../../lib/content-disposition.js';
 import { isVideoMime } from '../../lib/presentation.js';
 
@@ -19,7 +18,7 @@ export function registerPublicShareRoutes(app: FastifyInstance, container: Conta
       return reply.view('error.eta', { title: 'שגיאה', message: 'הדף לא נמצא.' });
     }
 
-    const file = await files.resolveBySlug(container.pool, request.params.slug);
+    const file = await container.services.files.resolveBySlug(request.params.slug);
     const now = container.ports.clock.now();
     const unavailable =
       !file ||
@@ -51,7 +50,7 @@ export function registerPublicShareRoutes(app: FastifyInstance, container: Conta
       return reply.send();
     }
 
-    const file = await files.resolveBySlug(container.pool, request.params.slug);
+    const file = await container.services.files.resolveBySlug(request.params.slug);
     const now = container.ports.clock.now();
     const expired =
       !file ||

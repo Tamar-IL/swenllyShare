@@ -186,10 +186,7 @@ export const jobs = {
   ): Promise<void> {
     const dedupeKey = `expire:${fileId}`;
     if (expiresAt === null) {
-      await db.query(
-        `DELETE FROM jobs WHERE dedupe_key = $1 AND status IN ('pending', 'processing')`,
-        [dedupeKey],
-      );
+      await jobs.cancelByDedupeKey(db, dedupeKey);
       return;
     }
     await db.query(
@@ -200,6 +197,26 @@ export const jobs = {
                       locked_at = NULL, last_error = NULL`,
       [dedupeKey, JSON.stringify({ tenantId, fileId }), expiresAt],
     );
+  },
+
+  /**
+   * Cancels any still-actionable (`pending`/`processing`) job keyed by `dedupeKey` —
+   * the general-purpose form of the delete branch `scheduleExpire` already has, pulled
+   * out so other lifecycle-ending writers (fix pass 4, item 1: `Files.deleteFile`) can
+   * cancel a job without going through expiry-specific semantics. A `done`/`failed`/
+   * `dead` job is left alone (nothing to cancel — it already stopped mattering), and a
+   * currently-`processing` job is still cancelled: the in-flight attempt itself is not
+   * interrupted, but this at least stops it from ever being retried after it fails, and
+   * pairs with the handlers' own `status === 'deleted'` no-op guard (files.ts,
+   * file-expire.ts, queue.ts) as the belt-and-braces half of the fix. Returns the number
+   * of jobs actually cancelled, mainly for tests/logging.
+   */
+  async cancelByDedupeKey(db: Queryable, dedupeKey: string): Promise<number> {
+    const { rowCount } = await db.query(
+      `DELETE FROM jobs WHERE dedupe_key = $1 AND status IN ('pending', 'processing')`,
+      [dedupeKey],
+    );
+    return rowCount ?? 0;
   },
 
   async findById(db: Queryable, id: string): Promise<JobRow | undefined> {
