@@ -13,7 +13,13 @@ export default defineConfig({
       {
         test: {
           name: 'integration',
-          include: ['tests/integration/**/*.test.ts', 'tests/contract/**/*.test.ts'],
+          include: [
+            'tests/integration/**/*.test.ts',
+            'tests/contract/**/*.test.ts',
+            // Red-team regression cases (docs/security/red-team-report.md). Same harness,
+            // same real-Postgres setup as the integration suite.
+            'tests/redteam/**/*.test.ts',
+          ],
           environment: 'node',
           setupFiles: ['tests/setup/db.ts'],
           // The DB harness serializes truncation between tests; keep it single-threaded
