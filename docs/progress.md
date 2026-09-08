@@ -20,3 +20,8 @@ Three lines per chunk, newest last. Live external calls made so far: **0**.
 - Real Zoho/Drive/Mailgun adapters (all `@unverified-live`, offline wire tests via undici MockAgent) + `docs/runbooks/live-spikes.md`; Hebrew-first RTL UI browser-verified with Playwright.
 - Red team broke the inbound pipeline (Critical: DMARC verdict read from an attacker-writable namespace; four High). All 22 pinned regressions now pass after the fix pass (auth results from `Authentication-Results` only, RFC 5322 From parser, re-check at send time + at-most-once send, real expiry/sweep scheduling, rate-key normalization, body cap, Message-Id dedupe, kill switch `INBOUND_REQUESTS_ENABLED`).
 - Sender-app QA found 8 bugs (fix pass in flight). Suite: 272 tests. Live external calls so far: **0**.
+
+## 2026-09-08 — Gates: QA, appsec, code review; fix passes 2–4; docs (green)
+- QA (8 bugs), appsec (2 must-fix incl. an unanchored `.gitignore` that had hidden the staging adapter from git), code review (2 High: delete vs scheduled jobs; sending-recovery) — all fixed, every pin flipped to a normal test; F-2 hardened to fail closed; ESLint now enforces the layer boundaries.
+- README, `docs/decisions.md` (20 ADRs), build-artifacts index. Suite: 316 tests green + 7 live-gated skips.
+- Critic gate in flight. Live external calls so far: **0** — see `docs/verification-ledger.md` and `docs/runbooks/live-spikes.md`.
