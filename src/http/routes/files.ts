@@ -2,11 +2,25 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Container } from '../../container.js';
 import { files } from '../../db/repositories/files.js';
 import { tenants } from '../../db/repositories/tenants.js';
+import { deliveries } from '../../db/repositories/deliveries.js';
 import { requireSessionHtml } from '../plugins/auth.js';
 import { issueCsrfToken } from '../plugins/csrf.js';
 import { AppError, ErrorCode } from '../../lib/errors.js';
+import { buildRequestAddress } from '../../lib/addressing.js';
 import type { AllowlistMode } from '../../db/repositories/files.js';
 import type { ExpiryMode } from '../../domain/settings.js';
+import {
+  computeDisplayStatus,
+  STATUS_META,
+  OUTCOME_META,
+  mechanismLabel,
+  formatHebrewDate,
+  formatHebrewDateTime,
+  formatByteCeiling,
+  expiryMetaLabel,
+  deliveryCountLabel,
+  isVideoMime,
+} from '../../lib/presentation.js';
 
 const DMARC_NOTE =
   'בקשות מגיעות רק מכתובות מאומתות (DMARC) — Gmail וכתובות רגילות עובדות; ' +
@@ -14,6 +28,7 @@ const DMARC_NOTE =
 
 const FLASH_MESSAGES: Record<string, string> = {
   saved: 'ההגדרות נשמרו.',
+  deleted: 'הקובץ נמחק.',
 };
 
 interface SettingsBody {
@@ -28,32 +43,56 @@ interface SettingsBody {
 
 async function renderNotFound(reply: FastifyReply): Promise<void> {
   reply.code(404);
-  await reply.view('error.eta', { message: 'הקובץ לא נמצא.' });
+  await reply.view('error.eta', { title: 'שגיאה', message: 'הקובץ לא נמצא.' });
 }
 
 /** Tenant-scoped file pages: list, per-file detail/settings, delete
  * (architecture.md §11). Every lookup goes through the tenant-scoped repository, so a
  * wrong tenant gets a plain 404 (AC-A3), never a 403 with any distinguishing detail. */
 export function registerFileRoutes(app: FastifyInstance, container: Container): void {
-  app.get('/files', { preHandler: requireSessionHtml }, async (request, reply) => {
-    if (!request.tenantId) return; // requireSessionHtml already redirected
-    const rows = await files.list(container.pool, request.tenantId);
-    return reply.view('files-list.eta', {
-      files: rows.map((f) => ({
-        id: f.id,
-        displayName: f.display_name,
-        status: f.status,
-        createdAt: f.created_at.toISOString(),
-      })),
-    });
-  });
+  app.get<{ Querystring: { flash?: string } }>(
+    '/files',
+    { preHandler: requireSessionHtml },
+    async (request, reply) => {
+      if (!request.tenantId) return; // requireSessionHtml already redirected
+      const now = container.ports.clock.now();
+      const [rows, sentCounts, csrfToken] = await Promise.all([
+        files.list(container.pool, request.tenantId),
+        deliveries.countsSentByTenant(container.pool, request.tenantId),
+        issueCsrfToken(reply),
+      ]);
+      const flash = request.query.flash ? FLASH_MESSAGES[request.query.flash] : undefined;
+
+      return reply.view('files-list.eta', {
+        title: 'הקבצים שלי',
+        appHeader: true,
+        csrfToken,
+        flash,
+        files: rows.map((f) => {
+          const status = computeDisplayStatus(f, now);
+          return {
+            id: f.id,
+            displayName: f.display_name,
+            isVideo: isVideoMime(f.mime),
+            pillClass: STATUS_META[status].pillClass,
+            statusLabel: STATUS_META[status].label,
+            uploadedAtLabel: formatHebrewDate(f.created_at),
+            deliveryCountLabel: deliveryCountLabel(sentCounts.get(f.id) ?? 0),
+          };
+        }),
+      });
+    },
+  );
 
   app.get('/files/new', { preHandler: requireSessionHtml }, async (request, reply) => {
     if (!request.tenantId) return;
     const csrfToken = await issueCsrfToken(reply);
     return reply.view('upload.eta', {
+      title: 'העלאת קובץ',
+      appHeader: true,
       csrfToken,
       maxUploadBytes: container.config.MAX_UPLOAD_BYTES,
+      maxUploadLabel: formatByteCeiling(container.config.MAX_UPLOAD_BYTES),
     });
   });
 
@@ -65,16 +104,29 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
       const file = await files.findById(container.pool, request.tenantId, request.params.id);
       if (!file) return renderNotFound(reply);
 
-      const tenant = await tenants.findById(container.pool, request.tenantId);
-      const allowlist = await container.services.settings.getAllowlist(request.tenantId, file.id);
-      const csrfToken = await issueCsrfToken(reply);
+      const now = container.ports.clock.now();
+      const [tenant, allowlist, deliveriesResult, csrfToken] = await Promise.all([
+        tenants.findById(container.pool, request.tenantId),
+        container.services.settings.getAllowlist(request.tenantId, file.id),
+        container.services.audit.listForFile(request.tenantId, file.id),
+        issueCsrfToken(reply),
+      ]);
       const flash = request.query.flash ? FLASH_MESSAGES[request.query.flash] : undefined;
+      const displayStatus = computeDisplayStatus(file, now);
 
       return reply.view('file-detail.eta', {
+        title: file.display_name,
+        appHeader: true,
         file: {
           id: file.id,
           displayName: file.display_name,
-          status: file.status,
+          isExpired: displayStatus === 'expired',
+          isPublishing: displayStatus === 'publishing',
+          isFailed: displayStatus === 'failed',
+          pillClass: STATUS_META[displayStatus].pillClass,
+          statusLabel: STATUS_META[displayStatus].label,
+          uploadedAtLabel: formatHebrewDate(file.created_at),
+          expiryMetaLabel: expiryMetaLabel(displayStatus, file.expires_at, now),
           customMessage: file.custom_message,
           expiryMode: file.expires_at ? 'custom' : 'none',
           expiresAtIso: file.expires_at ? file.expires_at.toISOString().slice(0, 10) : null,
@@ -83,9 +135,25 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
         },
         distributionUrl: container.services.links.distributionUrl(file),
         mailtoUrl: tenant ? container.services.links.mailtoUrl(file, tenant.slug) : '',
+        // Frontend-engineer addition: the plain `cust-<slug>+file-<token>@domain` address
+        // (no mailto: scheme, no encoded subject/body) for display and for the copy
+        // button — matching the UX brief §1.4 mock, which shows the bare address next to
+        // "העתק", not the full percent-encoded URI. The clickable artifact-card value
+        // still uses the full `mailtoUrl` href so clicking it opens a pre-filled email.
+        mailtoAddress: tenant
+          ? buildRequestAddress(tenant.slug, file.request_token, container.config.INBOUND_DOMAIN)
+          : '',
         csrfToken,
         flash,
         dmarcNote: DMARC_NOTE,
+        deliverySinceIso: deliveriesResult.items[0]?.created_at.toISOString() ?? '',
+        deliveries: deliveriesResult.items.map((d) => ({
+          address: d.requester_address,
+          mechanismLabel: mechanismLabel(d.mechanism),
+          pillClass: OUTCOME_META[d.outcome].pillClass,
+          outcomeLabel: OUTCOME_META[d.outcome].label,
+          atLabel: formatHebrewDateTime(d.created_at),
+        })),
       });
     },
   );
@@ -123,6 +191,7 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
         if (err instanceof AppError && err.code === ErrorCode.VALIDATION_ERROR) {
           reply.code(200);
           return reply.view('error.eta', {
+            title: 'שגיאה',
             message: err.message,
             resendHref: `/files/${request.params.id}`,
           });
@@ -140,7 +209,7 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
     async (request, reply) => {
       if (!request.tenantId) return;
       await container.services.files.deleteFile(request.tenantId, request.params.id);
-      return reply.redirect('/files');
+      return reply.redirect('/files?flash=deleted');
     },
   );
 }

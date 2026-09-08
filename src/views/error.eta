@@ -1,11 +1,16 @@
-<%/* Placeholder view. Data contract:
+<%/* Generic error page (architecture.md §11 — used for 404s, expired sign-in links,
+    settings-validation failures). Deliberately undifferentiated between "not found" and
+    "not yours" (AC-A3: never a distinguishing 403). Data contract:
       it.message     string   — generic, non-enumerating error text
       it.resendHref  string?  — link back to /signin to request a fresh link
 */%>
-<main>
-  <h1>שגיאה</h1>
-  <p role="alert"><%= it.message %></p>
-  <% if (it.resendHref) { %>
-  <p><a href="<%= it.resendHref %>">בקש/י קישור חדש</a></p>
-  <% } %>
-</main>
+<div class="page page-error">
+  <div class="empty-state">
+    <svg class="icon empty-state__icon" aria-hidden="true"><use href="#icon-alert-circle" /></svg>
+    <h1 class="empty-state__headline">שגיאה</h1>
+    <p role="alert" class="empty-state__body"><%= it.message %></p>
+    <% if (it.resendHref) { %>
+    <a class="btn btn-primary" href="<%= it.resendHref %>">בקש/י קישור חדש</a>
+    <% } %>
+  </div>
+</div>

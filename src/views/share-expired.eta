@@ -1,6 +1,14 @@
-<%/* Placeholder view. No data — a generic "this link no longer works" page, deliberately
-    undifferentiated between "expired" and "never existed" (no enumeration). */%>
-<main>
-  <h1>הקובץ אינו זמין</h1>
-  <p>הקישור פג תוקף או שהקובץ אינו קיים יותר.</p>
-</main>
+<%/* Branded page's expired state (UX brief §2, architecture.md §7): the page still
+    resolves (no 404), it just replaces the embed/download with a plain notice. No data —
+    deliberately undifferentiated between "expired" and "never existed" (no enumeration).
+    Keeps the placeholder's original "הקובץ אינו זמין" heading (asserted by
+    tests/integration/expiry.test.ts) alongside the UX brief's exact recipient-facing
+    line ("הקישור הזה כבר לא פעיל").
+*/%>
+<div class="page page-share">
+  <div class="share-card share-card--expired">
+    <svg class="icon empty-state__icon" aria-hidden="true"><use href="#icon-alert-circle" /></svg>
+    <h1 class="share-card__expired-headline">הקובץ אינו זמין</h1>
+    <p class="share-card__expired-text">הקישור הזה כבר לא פעיל</p>
+  </div>
+</div>

@@ -20,7 +20,7 @@ export function registerSignInRoutes(app: FastifyInstance, container: Container)
   app.get('/signin', async (request, reply) => {
     if (request.tenantId) return reply.redirect('/files');
     const csrfToken = await issueCsrfToken(reply);
-    return reply.view('signin.eta', { sent: false, csrfToken });
+    return reply.view('signin.eta', { title: 'כניסה', sent: false, csrfToken });
   });
 
   app.post<{ Body: SignInBody }>(
@@ -40,7 +40,7 @@ export function registerSignInRoutes(app: FastifyInstance, container: Container)
         await container.services.auth.requestMagicLink(email, request.ip);
       }
       const csrfToken = await issueCsrfToken(reply);
-      return reply.view('signin.eta', { sent: true, csrfToken });
+      return reply.view('signin.eta', { title: 'כניסה', sent: true, csrfToken });
     },
   );
 
@@ -57,7 +57,11 @@ export function registerSignInRoutes(app: FastifyInstance, container: Container)
     } catch (err) {
       if (err instanceof AppError) {
         reply.code(200);
-        return reply.view('error.eta', { message: err.message, resendHref: '/signin' });
+        return reply.view('error.eta', {
+          title: 'שגיאה',
+          message: err.message,
+          resendHref: '/signin',
+        });
       }
       throw err;
     }

@@ -1,5 +1,4 @@
-<%/* Placeholder view — semantic HTML only, no styling (the frontend engineer replaces
-    this). Data contract:
+<%/* Sign-in (UX brief §1.1, visual-spec.md §5). Data contract:
       it.sent       boolean  — true after a successful POST /signin (show the "check your
                                 mail" state instead of the form; no disclosure either way
                                 of whether the email is registered)
@@ -7,19 +6,35 @@
       it.error      string?  — a generic error message (e.g. the magic link was invalid)
       it.csrfToken  string   — for the hidden _csrf field
 */%>
-<main>
-  <h1>כניסה ל-Swenlly Share</h1>
-  <% if (it.sent) { %>
-  <p role="status">אם הכתובת קיימת במערכת, נשלח אליה קישור כניסה. בדוק/י את תיבת הדואר.</p>
-  <% } else { %>
-  <% if (it.error) { %>
-  <p role="alert"><%= it.error %></p>
-  <% } %>
-  <form method="post" action="/signin">
-    <input type="hidden" name="_csrf" value="<%= it.csrfToken %>" />
-    <label for="email">כתובת אימייל</label>
-    <input id="email" type="email" name="email" required value="<%= it.email || '' %>" />
-    <button type="submit">שלח קישור כניסה</button>
-  </form>
-  <% } %>
-</main>
+<div class="page page-signin">
+  <div class="signin-card">
+    <h1 class="signin-card__wordmark">Swenlly Share</h1>
+    <% if (it.sent) { %>
+    <p role="status" class="signin-card__message">
+      אם הכתובת קיימת במערכת, נשלח אליה קישור כניסה. בדוק/י את תיבת הדואר.
+    </p>
+    <% } else { %>
+    <% if (it.error) { %>
+    <p role="alert" class="form-alert"><%= it.error %></p>
+    <% } %>
+    <form method="post" action="/signin" class="stacked-form" novalidate>
+      <input type="hidden" name="_csrf" value="<%= it.csrfToken %>" />
+      <div class="field">
+        <label for="email">כתובת אימייל</label>
+        <input
+          id="email"
+          class="input"
+          type="email"
+          name="email"
+          dir="ltr"
+          autocomplete="email"
+          required
+          value="<%= it.email || '' %>"
+        />
+      </div>
+      <button type="submit" class="btn btn-primary btn-block">שלח קישור כניסה</button>
+      <p class="signin-card__help">אין צורך בסיסמה — נשלח לך קישור התחברות למייל.</p>
+    </form>
+    <% } %>
+  </div>
+</div>

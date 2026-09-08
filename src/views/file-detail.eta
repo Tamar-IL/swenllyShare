@@ -1,78 +1,239 @@
-<%/* Placeholder view. Data contract:
+<%/* Per-file page — the product's core screen (UX brief §1.4, §4; visual-spec.md §4.3,
+    §5). Data contract:
       it.file {
-        id: string, displayName: string, status: string,
+        id, displayName, isExpired, isPublishing, isFailed,
+        pillClass, statusLabel, uploadedAtLabel, expiryMetaLabel,
         customMessage: string|null, expiryMode: 'none'|'days'|'custom',
         expiresAtIso: string|null, allowlistMode: 'open'|'allowlist',
         allowlist: string[]
       }
       it.distributionUrl  string|undefined  — undefined while still publishing
-      it.mailtoUrl        string            — the pre-filled request mailto: link
+      it.mailtoUrl        string            — full mailto: URI (href target)
+      it.mailtoAddress    string            — plain "cust-…@…" address (display + copy)
       it.csrfToken        string
-      it.flash            string|undefined  — one-shot message after a settings save
+      it.flash            string|undefined  — shown by layout.eta, not repeated here
       it.dmarcNote        string            — the sender-facing DMARC caveat (UX brief §3)
+      it.deliverySinceIso string            — newest delivery's created_at, '' if none;
+                                               island.js polls /deliveries?since=this
+      it.deliveries        Array<{ address, mechanismLabel, pillClass, outcomeLabel, atLabel }>
 */%>
-<main>
-  <h1><%= it.file.displayName %></h1>
-  <% if (it.flash) { %>
-  <p role="status"><%= it.flash %></p>
+<div class="page page-file-detail">
+  <a class="back-link" href="/files">
+    <svg class="icon icon-mirror" aria-hidden="true"><use href="#icon-chevron-back" /></svg>
+    חזרה לרשימה
+  </a>
+
+  <div class="file-detail__header">
+    <h1 class="file-detail__name"><%= it.file.displayName %></h1>
+    <span class="pill <%= it.file.pillClass %>"><%= it.file.statusLabel %></span>
+  </div>
+  <p class="file-detail__meta">הועלה ב-<%= it.file.uploadedAtLabel %> · <%= it.file.expiryMetaLabel %></p>
+
+  <% if (it.file.isPublishing) { %>
+  <div
+    class="notice notice-info"
+    role="status"
+    data-poll-status
+    data-status-url="/api/files/<%= it.file.id %>/status"
+  >
+    הקובץ עדיין מתפרסם — הקישורים יופיעו ברגע שהעיבוד יסתיים. הדף יתעדכן אוטומטית.
+  </div>
   <% } %>
-  <p>סטטוס: <%= it.file.status %></p>
-  <% if (it.distributionUrl) { %>
-  <p>קישור להפצה: <a href="<%= it.distributionUrl %>"><%= it.distributionUrl %></a></p>
+  <% if (it.file.isFailed) { %>
+  <div class="notice notice-danger" role="alert">
+    ההעלאה נכשלה. ניתן למחוק את הקובץ ולנסות שוב.
+  </div>
   <% } %>
-  <p>קישור לבקשת הקובץ במייל: <a href="<%= it.mailtoUrl %>"><%= it.mailtoUrl %></a></p>
-  <p><small><%= it.dmarcNote %></small></p>
 
-  <form method="post" action="/files/<%= it.file.id %>/settings">
-    <input type="hidden" name="_csrf" value="<%= it.csrfToken %>" />
-    <label>שם תצוגה <input name="displayName" value="<%= it.file.displayName %>" /></label>
-    <label>הודעה אישית <textarea name="customMessage"><%= it.file.customMessage || '' %></textarea></label>
-
-    <fieldset>
-      <legend>תפוגה</legend>
-      <label
-        ><input type="radio" name="expiryMode" value="none" <%= it.file.expiryMode === 'none' ? 'checked' : '' %> />
-        ללא תפוגה</label
+  <section class="artifact-card artifact-card--dist<%= it.file.isExpired ? ' is-disabled' : '' %>">
+    <h2 class="artifact-card__label">
+      <svg class="icon" aria-hidden="true"><use href="#icon-link" /></svg>
+      קישור להפצה
+    </h2>
+    <% if (it.distributionUrl) { %>
+    <div class="artifact-card__value-row">
+      <span class="artifact-card__value ltr-token"><%= it.distributionUrl %></span>
+      <button
+        type="button"
+        class="btn btn-secondary copy-btn"
+        data-copy-text="<%= it.distributionUrl %>"
+        aria-label="העתקת קישור להפצה"
+        <%= it.file.isExpired ? 'disabled' : '' %>
       >
-      <label
-        ><input type="radio" name="expiryMode" value="days" <%= it.file.expiryMode === 'days' ? 'checked' : '' %> />
-        בעוד <input type="number" name="expiryDays" min="1" /> ימים</label
-      >
-      <label
-        ><input type="radio" name="expiryMode" value="custom" <%= it.file.expiryMode === 'custom' ? 'checked' : '' %> />
-        תאריך <input type="date" name="expiresAt" value="<%= it.file.expiresAtIso || '' %>"
-      /></label>
-    </fieldset>
-
-    <fieldset>
-      <legend>הרשאת גישה</legend>
-      <label
-        ><input type="radio" name="allowlistMode" value="open" <%= it.file.allowlistMode === 'open' ? 'checked' : '' %> />
-        פתוח לכולם</label
-      >
-      <label
-        ><input
-          type="radio"
-          name="allowlistMode"
-          value="allowlist"
-          <%= it.file.allowlistMode === 'allowlist' ? 'checked' : '' %>
-        />
-        רשימת היתר בלבד</label
-      >
-      <textarea name="allowlist" placeholder="user@example.com&#10;@example.com"><%= it.file.allowlist.join('\n') %></textarea>
-    </fieldset>
-
-    <button type="submit">שמירה</button>
-  </form>
-
-  <form method="post" action="/files/<%= it.file.id %>/delete">
-    <input type="hidden" name="_csrf" value="<%= it.csrfToken %>" />
-    <button type="submit">מחיקה</button>
-  </form>
-
-  <section id="deliveries" data-file-id="<%= it.file.id %>">
-    <h2>יומן בקשות</h2>
-    <ul></ul>
+        <svg class="icon copy-btn__icon-idle" aria-hidden="true"><use href="#icon-copy" /></svg>
+        <svg class="icon copy-btn__icon-done" aria-hidden="true" hidden><use href="#icon-check" /></svg>
+      </button>
+    </div>
+    <% } %>
+    <% if (it.file.isExpired) { %>
+    <p class="artifact-card__explainer artifact-card__explainer--warning">
+      <svg class="icon" aria-hidden="true"><use href="#icon-alert-circle" /></svg>
+      תוקף הקובץ פג — הקישור אינו פעיל יותר.
+    </p>
+    <% } else { %>
+    <p class="artifact-card__explainer">
+      למי לשלוח את זה: אנשים עם אינטרנט מסונן (נטפרי/רימון). הקישור הזה עובר את הסינון ונפתח ישירות.
+    </p>
+    <% } %>
   </section>
-  <script src="/assets/island.js"></script>
-</main>
+
+  <section class="artifact-card artifact-card--email<%= it.file.isExpired ? ' is-disabled' : '' %>">
+    <h2 class="artifact-card__label">
+      <svg class="icon" aria-hidden="true"><use href="#icon-mail" /></svg>
+      קישור בקשה במייל
+    </h2>
+    <div class="artifact-card__value-row">
+      <a class="artifact-card__value ltr-token" href="<%= it.mailtoUrl %>"><%= it.mailtoAddress %></a>
+      <button
+        type="button"
+        class="btn btn-secondary copy-btn"
+        data-copy-text="<%= it.mailtoAddress %>"
+        aria-label="העתקת כתובת בקשה במייל"
+        <%= it.file.isExpired ? 'disabled' : '' %>
+      >
+        <svg class="icon copy-btn__icon-idle" aria-hidden="true"><use href="#icon-copy" /></svg>
+        <svg class="icon copy-btn__icon-done" aria-hidden="true" hidden><use href="#icon-check" /></svg>
+      </button>
+    </div>
+    <% if (it.file.isExpired) { %>
+    <p class="artifact-card__explainer artifact-card__explainer--warning">
+      <svg class="icon" aria-hidden="true"><use href="#icon-alert-circle" /></svg>
+      תוקף הקובץ פג — בקשות חדשות לא יתקבלו.
+    </p>
+    <% } else { %>
+    <p class="artifact-card__explainer">
+      למי לשלוח את זה: אנשים עם אימייל בלבד (ללא גישה כללית לאינטרנט). לחיצה תפתח מייל מוכן מראש
+      — הם רק שולחים אותו, והקובץ יגיע אליהם תוך דקות.
+    </p>
+    <% } %>
+    <p class="artifact-card__note"><%= it.dmarcNote %></p>
+  </section>
+
+  <section class="settings-section">
+    <h2>הגדרות</h2>
+    <form method="post" action="/files/<%= it.file.id %>/settings" class="stacked-form">
+      <input type="hidden" name="_csrf" value="<%= it.csrfToken %>" />
+
+      <div class="field">
+        <label for="displayName">שם הקובץ המוצג</label>
+        <input
+          id="displayName"
+          class="input"
+          name="displayName"
+          required
+          value="<%= it.file.displayName %>"
+        />
+      </div>
+
+      <div class="field">
+        <label for="customMessage">הודעה אישית</label>
+        <textarea id="customMessage" class="input" name="customMessage" rows="3"><%= it.file.customMessage || '' %></textarea>
+        <p class="input-help">הטקסט הזה יופיע במייל שנשלח בתגובה לבקשה.</p>
+      </div>
+
+      <fieldset class="field-group">
+        <legend>תוקף</legend>
+        <label class="radio-option">
+          <input type="radio" name="expiryMode" value="none" <%= it.file.expiryMode === 'none' ? 'checked' : '' %> />
+          ללא תוקף
+        </label>
+        <label class="radio-option">
+          <input type="radio" name="expiryMode" value="days" <%= it.file.expiryMode === 'days' ? 'checked' : '' %> />
+          בעוד <input class="input input--inline" type="number" name="expiryDays" min="1" value="30" /> ימים
+        </label>
+        <label class="radio-option">
+          <input type="radio" name="expiryMode" value="custom" <%= it.file.expiryMode === 'custom' ? 'checked' : '' %> />
+          תאריך
+          <input class="input input--inline" type="date" name="expiresAt" value="<%= it.file.expiresAtIso || '' %>" />
+        </label>
+      </fieldset>
+
+      <fieldset class="field-group">
+        <legend>הרשאת גישה</legend>
+        <label class="radio-option">
+          <input
+            type="radio"
+            name="allowlistMode"
+            value="open"
+            <%= it.file.allowlistMode === 'open' ? 'checked' : '' %>
+          />
+          פתוח לכולם
+        </label>
+        <label class="radio-option">
+          <input
+            type="radio"
+            name="allowlistMode"
+            value="allowlist"
+            <%= it.file.allowlistMode === 'allowlist' ? 'checked' : '' %>
+          />
+          רשימת היתר בלבד
+        </label>
+        <label class="field" for="allowlist">
+          <span class="visually-hidden">כתובות ברשימת ההיתר</span>
+          <textarea
+            id="allowlist"
+            class="input"
+            name="allowlist"
+            rows="3"
+            dir="ltr"
+            placeholder="user@example.com&#10;@example.com"
+          ><%= it.file.allowlist.join('\n') %></textarea>
+        </label>
+      </fieldset>
+
+      <button type="submit" class="btn btn-primary">שמירה</button>
+    </form>
+  </section>
+
+  <section class="deliveries-section" id="deliveries" data-file-id="<%= it.file.id %>" data-since="<%= it.deliverySinceIso %>">
+    <h2>מי קיבל את הקובץ</h2>
+    <% if (it.deliveries.length === 0) { %>
+    <p class="deliveries-empty" id="deliveries-empty">עדיין אף אחד לא ביקש את הקובץ הזה</p>
+    <% } %>
+    <div class="deliveries-table-wrap">
+      <table class="deliveries-table" id="deliveries-table" <%= it.deliveries.length === 0 ? 'hidden' : '' %>>
+        <caption class="visually-hidden">מי קיבל את הקובץ</caption>
+        <thead>
+          <tr>
+            <th scope="col">כתובת</th>
+            <th scope="col">אופן מסירה</th>
+            <th scope="col">סטטוס</th>
+            <th scope="col">מועד</th>
+          </tr>
+        </thead>
+        <tbody id="deliveries-tbody">
+          <% it.deliveries.forEach(function (d) { %>
+          <tr>
+            <td data-label="כתובת"><span class="ltr-token"><%= d.address %></span></td>
+            <td data-label="אופן מסירה"><span class="tag"><%= d.mechanismLabel %></span></td>
+            <td data-label="סטטוס"><span class="pill <%= d.pillClass %>"><%= d.outcomeLabel %></span></td>
+            <td data-label="מועד"><span class="ltr-token"><%= d.atLabel %></span></td>
+          </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="danger-zone">
+    <button type="button" class="btn btn-destructive" data-confirm-dialog="delete-dialog">
+      <svg class="icon" aria-hidden="true"><use href="#icon-trash" /></svg>
+      מחיקת קובץ
+    </button>
+  </section>
+
+  <dialog id="delete-dialog" class="confirm-dialog">
+    <form method="post" action="/files/<%= it.file.id %>/delete">
+      <input type="hidden" name="_csrf" value="<%= it.csrfToken %>" />
+      <h2>מחיקת הקובץ</h2>
+      <p>
+        הקובץ "<%= it.file.displayName %>" יימחק ואף אחד לא יוכל לגשת אליו יותר — לא ניתן לבטל
+        פעולה זו.
+      </p>
+      <div class="confirm-dialog__actions">
+        <button type="submit" class="btn btn-destructive">מחיקה</button>
+        <button type="button" class="btn btn-secondary" data-dialog-cancel autofocus>ביטול</button>
+      </div>
+    </form>
+  </dialog>
+</div>

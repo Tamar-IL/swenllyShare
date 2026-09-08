@@ -153,4 +153,20 @@ export const deliveries = {
     );
     return Number(rows[0]?.count ?? '0');
   },
+
+  /**
+   * Frontend-engineer addition (Lane C): one grouped query for the file list's "נשלח
+   * ל-N" mini delivery count (UX brief §1.2), instead of one `countForFile` call per row
+   * — the list can hold up to 100 files (`files.list`'s default limit), so N+1 queries
+   * would be the wrong shape for a page render.
+   */
+  async countsSentByTenant(db: Queryable, tenantId: string): Promise<Map<string, number>> {
+    const { rows } = await db.query<{ file_id: string; count: string }>(
+      `SELECT file_id, count(*)::text AS count FROM deliveries
+       WHERE tenant_id = $1 AND outcome = 'sent'
+       GROUP BY file_id`,
+      [tenantId],
+    );
+    return new Map(rows.map((r) => [r.file_id, Number(r.count)]));
+  },
 };

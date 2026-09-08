@@ -1,26 +1,47 @@
-<%/* Placeholder view. Data contract:
-      it.files  Array<{ id: string, displayName: string, status: string,
-                        createdAt: string (ISO) }>
+<%/* File list ("my files") — UX brief §1.2, visual-spec.md §5. Data contract:
+      it.csrfToken  string           — for the header sign-out form (layout.eta)
+      it.flash      string?          — e.g. "הקובץ נמחק." after a delete
+      it.files      Array<{
+        id: string, displayName: string, isVideo: boolean,
+        pillClass: string, statusLabel: string,
+        uploadedAtLabel: string, deliveryCountLabel: string,
+      }>
 */%>
-<main>
-  <h1>הקבצים שלי</h1>
-  <p><a href="/files/new">העלאת קובץ חדש</a></p>
-  <table>
-    <thead>
-      <tr>
-        <th>שם</th>
-        <th>סטטוס</th>
-        <th>נוצר</th>
-      </tr>
-    </thead>
-    <tbody>
-      <% it.files.forEach(function (f) { %>
-      <tr>
-        <td><a href="/files/<%= f.id %>"><%= f.displayName %></a></td>
-        <td><%= f.status %></td>
-        <td><%= f.createdAt %></td>
-      </tr>
-      <% }) %>
-    </tbody>
-  </table>
-</main>
+<div class="page page-files">
+  <div class="page-files__header">
+    <h1>הקבצים שלי</h1>
+    <a class="btn btn-primary" href="/files/new">
+      <span aria-hidden="true">+</span>
+      קובץ חדש
+    </a>
+  </div>
+
+  <% if (it.files.length === 0) { %>
+  <div class="empty-state">
+    <svg class="icon empty-state__icon" aria-hidden="true"><use href="#icon-upload-cloud" /></svg>
+    <h2 class="empty-state__headline">עדיין לא העלית קובץ</h2>
+    <p class="empty-state__body">העלאת הקובץ הראשון שלך תיתן לך קישור להפצה וקישור בקשה במייל, מוכנים לשליחה.</p>
+    <a class="btn btn-primary" href="/files/new">+ קובץ חדש</a>
+  </div>
+  <% } else { %>
+  <ul class="file-rows" role="list">
+    <% it.files.forEach(function (f) { %>
+    <li class="file-row">
+      <a class="file-row__link" href="/files/<%= f.id %>">
+        <svg class="icon file-row__icon" aria-hidden="true">
+          <use href="<%= f.isVideo ? '#icon-file-video' : '#icon-file' %>" />
+        </svg>
+        <span class="file-row__main">
+          <span class="file-row__name"><%= f.displayName %></span>
+          <span class="file-row__meta">
+            <span class="pill <%= f.pillClass %>"><%= f.statusLabel %></span>
+            <span class="file-row__date">הועלה ב-<%= f.uploadedAtLabel %></span>
+          </span>
+        </span>
+        <span class="file-row__deliveries"><%= f.deliveryCountLabel %></span>
+      </a>
+    </li>
+    <% }) %>
+  </ul>
+  <% } %>
+</div>

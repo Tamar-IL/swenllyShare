@@ -1,12 +1,31 @@
-<%/* Placeholder view. Data contract:
+<%/* Branded embed page, flag ON (UX brief §2, architecture.md §7, AC-U3). The wordmark
+    itself is rendered by layout.eta's minimal header (it.appHeader left falsy) — this
+    template is only the content below it. Data contract:
       it.displayName  string
       it.embedSrc     string — the workdrive.zohoexternal.com embed iframe src. The raw
                                 Zoho public link/URL itself is NEVER passed to this
                                 template (AC-U3).
+      it.isVideo      boolean — picks the embed frame's aspect ratio (visual-spec.md §5:
+                                 4/3 for documents, 16/9 for video; frontend-engineer
+                                 addition — the mime type was already on the resolved
+                                 file row, this just carries the one bit the template
+                                 needs instead of re-deriving it from a mime string).
       it.downloadHref string — GET /s/:slug/download (server-proxied, not a redirect)
 */%>
-<main>
-  <h1>Swenlly · <%= it.displayName %></h1>
-  <iframe src="<%= it.embedSrc %>" title="<%= it.displayName %>"></iframe>
-  <p><a href="<%= it.downloadHref %>">הורדת הקובץ</a></p>
-</main>
+<div class="page page-share">
+  <div class="share-card">
+    <p class="share-card__filename"><%= it.displayName %></p>
+    <div class="share-embed<%= it.isVideo ? ' share-embed--video' : ' share-embed--doc' %>">
+      <iframe
+        src="<%= it.embedSrc %>"
+        title="<%= it.displayName %>"
+        loading="lazy"
+        allow="fullscreen"
+      ></iframe>
+    </div>
+    <a class="btn btn-primary btn-block" href="<%= it.downloadHref %>">
+      <svg class="icon" aria-hidden="true"><use href="#icon-download" /></svg>
+      הורדת קובץ
+    </a>
+  </div>
+</div>

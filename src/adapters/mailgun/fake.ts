@@ -87,6 +87,21 @@ export class FakeOutboundMail implements OutboundMailPort {
           }
         : undefined,
     });
+
+    // Frontend-engineer addition, dev-only: this class only ever exists when
+    // `ADAPTERS=fake` (or `ADAPTER_OVERRIDES=mailgun=fake`) — container.ts is the only
+    // place that constructs it — so there is no `ADAPTERS` check to make here; printing
+    // is inherently gated by which adapter got wired up. There is no other dev-visible
+    // hook for the magic-link token (it's stored only as a sha256 hash in Postgres), and
+    // manual/browser verification of the sign-in flow needs the plaintext link.
+    // `console.info`, not `pino`: this adapter has no injected logger (its whole point is
+    // being a zero-config drop-in), and this is terminal-only dev output, never a
+    // structured production log line.
+    const linkMatch = /https?:\/\/\S*\/auth\/callback\?token=\S+/.exec(message.text);
+    if (linkMatch) {
+      console.info(`[dev] magic sign-in link for ${message.to}: ${linkMatch[0]}`);
+    }
+
     return { providerMessageId: `fake-outbound-${this.sent.length}` };
   }
 }
