@@ -1,0 +1,12 @@
+<%/* Placeholder view. Data contract:
+      it.displayName  string
+      it.embedSrc     string — the workdrive.zohoexternal.com embed iframe src. The raw
+                                Zoho public link/URL itself is NEVER passed to this
+                                template (AC-U3).
+      it.downloadHref string — GET /s/:slug/download (server-proxied, not a redirect)
+*/%>
+<main>
+  <h1>Swenlly · <%= it.displayName %></h1>
+  <iframe src="<%= it.embedSrc %>" title="<%= it.displayName %>"></iframe>
+  <p><a href="<%= it.downloadHref %>">הורדת הקובץ</a></p>
+</main>

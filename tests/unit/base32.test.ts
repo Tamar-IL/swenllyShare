@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { encodeBase32, opaqueToken } from '../../src/lib/base32.js';
+import { encodeBase32, opaqueToken, opaqueTokenExact } from '../../src/lib/base32.js';
 
 // Crockford base32: lowercase, digits 0-9 and letters a-z minus i, l, o, u.
 const CROCKFORD_CHARSET_RE = /^[0-9a-hjkmnp-tv-z]+$/;
@@ -56,5 +56,34 @@ describe('opaqueToken', () => {
     expect(() => opaqueToken(0)).toThrow();
     expect(() => opaqueToken(-8)).toThrow();
     expect(() => opaqueToken(12.5)).toThrow();
+  });
+});
+
+describe('opaqueTokenExact', () => {
+  it('produces exactly ceil(bits/5) characters for 130 bits (26) — the length the inbound-address grammar (lib/addressing.ts) requires', () => {
+    expect(opaqueTokenExact(130)).toHaveLength(26);
+  });
+
+  it('produces exactly ceil(bits/5) characters for 128 bits (26) too, matching opaqueToken(128)', () => {
+    expect(opaqueTokenExact(128)).toHaveLength(26);
+    expect(opaqueToken(128)).toHaveLength(26);
+  });
+
+  it('only ever contains lowercase Crockford-alphabet characters', () => {
+    const CROCKFORD_CHARSET_RE = /^[0-9a-hjkmnp-tv-z]+$/;
+    for (let i = 0; i < 20; i++) {
+      expect(opaqueTokenExact(130)).toMatch(CROCKFORD_CHARSET_RE);
+    }
+  });
+
+  it('is not predictable across calls', () => {
+    const tokens = new Set(Array.from({ length: 50 }, () => opaqueTokenExact(130)));
+    expect(tokens.size).toBe(50);
+  });
+
+  it('rejects non-positive or non-integer bit counts', () => {
+    expect(() => opaqueTokenExact(0)).toThrow();
+    expect(() => opaqueTokenExact(-1)).toThrow();
+    expect(() => opaqueTokenExact(12.5)).toThrow();
   });
 });

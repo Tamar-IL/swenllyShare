@@ -1,0 +1,26 @@
+<%/* Placeholder view. Data contract:
+      it.files  Array<{ id: string, displayName: string, status: string,
+                        createdAt: string (ISO) }>
+*/%>
+<main>
+  <h1>הקבצים שלי</h1>
+  <p><a href="/files/new">העלאת קובץ חדש</a></p>
+  <table>
+    <thead>
+      <tr>
+        <th>שם</th>
+        <th>סטטוס</th>
+        <th>נוצר</th>
+      </tr>
+    </thead>
+    <tbody>
+      <% it.files.forEach(function (f) { %>
+      <tr>
+        <td><a href="/files/<%= f.id %>"><%= f.displayName %></a></td>
+        <td><%= f.status %></td>
+        <td><%= f.createdAt %></td>
+      </tr>
+      <% }) %>
+    </tbody>
+  </table>
+</main>

@@ -1,0 +1,11 @@
+<%/* Placeholder view. Data contract:
+      it.message     string   — generic, non-enumerating error text
+      it.resendHref  string?  — link back to /signin to request a fresh link
+*/%>
+<main>
+  <h1>שגיאה</h1>
+  <p role="alert"><%= it.message %></p>
+  <% if (it.resendHref) { %>
+  <p><a href="<%= it.resendHref %>">בקש/י קישור חדש</a></p>
+  <% } %>
+</main>

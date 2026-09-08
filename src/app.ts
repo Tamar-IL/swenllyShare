@@ -1,20 +1,51 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import Fastify, { type FastifyInstance } from 'fastify';
-import type pg from 'pg';
-import type { Config } from './config.js';
-import { AppError, ErrorCode } from './lib/errors.js';
-import { jobs } from './db/repositories/jobs.js';
+import cookie from '@fastify/cookie';
+import formbody from '@fastify/formbody';
+import multipart from '@fastify/multipart';
+import staticPlugin from '@fastify/static';
+import view from '@fastify/view';
+import rateLimit from '@fastify/rate-limit';
+import { Eta } from 'eta';
+import type { Container } from './container.js';
+import { registerAuthPlugin } from './http/plugins/auth.js';
+import { registerCsrfPlugin } from './http/plugins/csrf.js';
+import { registerSecurityHeaders } from './http/plugins/security-headers.js';
+import { registerErrorHandler } from './http/plugins/error-handler.js';
+import { registerHealthRoutes } from './http/routes/health.js';
+import { registerSignInRoutes } from './http/routes/signin.js';
+import { registerFileRoutes } from './http/routes/files.js';
+import { registerApiFileRoutes } from './http/routes/api-files.js';
+import { registerPublicShareRoutes } from './http/routes/public-share.js';
+import { registerWebhookRoutes } from './http/routes/webhook-mailgun.js';
+
+// Same "src/ and dist/ are the same depth under the repo root" reasoning as
+// `db/migrate.ts` — views and static assets are never copied by `tsc`, so this must
+// resolve to the source tree regardless of whether this runs as `src/app.ts` (via tsx) or
+// the compiled `dist/app.js` (architecture.md §1: single-deployable ships the full repo).
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const VIEWS_DIR = path.join(__dirname, '..', 'src', 'views');
+const PUBLIC_DIR = path.join(__dirname, '..', 'src', 'public');
 
 export interface BuildAppOptions {
-  config: Config;
-  pool: pg.Pool;
+  container: Container;
 }
 
 /**
- * Minimal app factory: `/healthz` and `/readyz` only. Lane B (backend-engineer) extends
- * this with the real route table (architecture.md §11) — HTTP handlers stay thin here
- * on purpose so that extension is additive, not a rewrite.
+ * Assembles the full route table (architecture.md §11) on top of the shared plugins:
+ * signed-cookie sessions, CSRF, security headers, and the standard JSON error shape.
+ * Route registration is additive over the Lane A health checks — HTTP handlers stay thin
+ * on purpose, calling exactly one domain service and rendering; no SQL and no business
+ * logic live in this file or under `http/routes/*`.
+ *
+ * Async because route registration below references decorators (`app.csrfProtection`)
+ * that third-party plugins only attach once their own `register()` promise resolves —
+ * awaiting each registration in order keeps that dependency explicit instead of racing it.
  */
-export function buildApp({ config, pool }: BuildAppOptions): FastifyInstance {
+export async function buildApp({ container }: BuildAppOptions): Promise<FastifyInstance> {
+  const { config } = container;
+
   const app = Fastify({
     logger: {
       level: config.LOG_LEVEL,
@@ -25,41 +56,46 @@ export function buildApp({ config, pool }: BuildAppOptions): FastifyInstance {
           'req.headers.authorization',
           'req.headers.cookie',
           'req.headers["x-mailgun-signature"]',
+          'req.headers["x-csrf-token"]',
           'req.body.signature',
           'req.body.token',
           'req.body.request_token',
           'req.body.public_slug',
+          'req.body.email',
         ],
         censor: '[redacted]',
       },
     },
   });
 
-  app.get('/healthz', async () => ({ ok: true }));
-
-  app.get('/readyz', async (_request, reply) => {
-    try {
-      await pool.query('SELECT 1');
-      const pendingJobs = await jobs.countPending(pool);
-      return { ok: true, db: true, pendingJobs };
-    } catch (err) {
-      app.log.error({ err }, 'readyz: database check failed');
-      reply.code(503);
-      return { ok: false, db: false, pendingJobs: 0 };
-    }
+  await app.register(cookie, { secret: config.SESSION_SECRET });
+  await app.register(formbody);
+  await app.register(multipart);
+  await app.register(staticPlugin, { root: PUBLIC_DIR, prefix: '/assets/' });
+  await app.register(view, {
+    engine: { eta: new Eta() },
+    root: VIEWS_DIR,
+    viewExt: 'eta',
+    layout: 'layout.eta',
+    production: config.NODE_ENV === 'production',
+    // Every content template renders inside layout.eta, which reads it.title — most
+    // routes don't need a page-specific one, so this is the fallback rather than making
+    // every single `reply.view(...)` call repeat it.
+    defaultContext: { title: 'Swenlly Share' },
   });
+  await app.register(rateLimit, { global: false });
+  await registerCsrfPlugin(app);
+  await registerSecurityHeaders(app);
 
-  // Error handler stub (architecture.md §11: every JSON error body is
-  // `{error: <code>, message?: <string>}`). Lane B's routes throw `AppError` for
-  // anything with a defined code; anything else is an unexpected 500.
-  app.setErrorHandler((err, request, reply) => {
-    if (err instanceof AppError) {
-      reply.code(err.statusCode).send({ error: err.code, message: err.message });
-      return;
-    }
-    request.log.error({ err }, 'unhandled error');
-    reply.code(500).send({ error: ErrorCode.INTERNAL_ERROR });
-  });
+  registerAuthPlugin(app, container);
+  registerErrorHandler(app);
+
+  registerHealthRoutes(app, container);
+  registerSignInRoutes(app, container);
+  registerFileRoutes(app, container);
+  registerApiFileRoutes(app, container);
+  registerPublicShareRoutes(app, container);
+  registerWebhookRoutes(app, container);
 
   return app;
 }

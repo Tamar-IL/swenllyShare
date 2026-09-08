@@ -74,6 +74,22 @@ export const jobs = {
     return rows[0];
   },
 
+  /**
+   * Defers a job to `runAfter` without counting it as a failed attempt (`attempts`,
+   * `last_error` untouched). Used for SharingEngine's paced re-share (architecture.md
+   * §5): a deferred share is not a failure, so it must not erode the job's
+   * `JOB_MAX_ATTEMPTS` budget the way `fail()` does.
+   */
+  async reschedule(db: Queryable, id: string, runAfter: Date): Promise<JobRow | undefined> {
+    const { rows } = await db.query<JobRow>(
+      `UPDATE jobs SET status = 'pending', run_after = $2, locked_at = NULL
+       WHERE id = $1
+       RETURNING *`,
+      [id, runAfter],
+    );
+    return rows[0];
+  },
+
   async complete(db: Queryable, id: string): Promise<JobRow | undefined> {
     const { rows } = await db.query<JobRow>(
       `UPDATE jobs SET status = 'done', locked_at = NULL WHERE id = $1 RETURNING *`,
@@ -109,6 +125,15 @@ export const jobs = {
 
   async findById(db: Queryable, id: string): Promise<JobRow | undefined> {
     const { rows } = await db.query<JobRow>('SELECT * FROM jobs WHERE id = $1', [id]);
+    return rows[0];
+  },
+
+  /** Looks up a job by its (unique, when set) `dedupe_key` — used by `GET
+   * /api/files/:id/status` to surface a `file.publish` job's `last_error`. */
+  async findByDedupeKey(db: Queryable, dedupeKey: string): Promise<JobRow | undefined> {
+    const { rows } = await db.query<JobRow>('SELECT * FROM jobs WHERE dedupe_key = $1', [
+      dedupeKey,
+    ]);
     return rows[0];
   },
 

@@ -38,6 +38,19 @@ export const driveCopies = {
     return rows[0];
   },
 
+  async findById(
+    db: Queryable,
+    tenantId: string,
+    fileId: string,
+    copyId: string,
+  ): Promise<DriveCopyRow | undefined> {
+    const { rows } = await db.query<DriveCopyRow>(
+      'SELECT * FROM drive_copies WHERE tenant_id = $1 AND file_id = $2 AND id = $3',
+      [tenantId, fileId, copyId],
+    );
+    return rows[0];
+  },
+
   async getBySeq(
     db: Queryable,
     tenantId: string,
@@ -134,23 +147,32 @@ export const driveCopies = {
   },
 
   /**
-   * Reserve a share slot: `share_count += 1`, `last_share_at = now()`. Called inside
+   * Reserve a share slot: `share_count += 1`, `last_share_at = now`. Called inside
    * the advisory-lock transaction, before the external `sharePermission` call
    * (architecture.md §5) — over-counting on a failed call is harmless, under-counting
    * is not, so the reservation always happens first.
+   *
+   * `now` is passed in explicitly (from the caller's injected `Clock`) rather than using
+   * SQL `now()`: `SharingEngine`'s pacing check (architecture.md §5) compares
+   * `last_share_at` against that same `Clock`, so both sides of the comparison must come
+   * from one time source — otherwise a `FakeClock` frozen for a virtual-time test would
+   * be compared against Postgres's real wall-clock `last_share_at`, and the two would
+   * never agree (this was caught by the SharingEngine pacing test during development;
+   * see docs/lessons.md).
    */
   async reserveShare(
     db: Queryable,
     tenantId: string,
     fileId: string,
     copyId: string,
+    now: Date,
   ): Promise<DriveCopyRow | undefined> {
     const { rows } = await db.query<DriveCopyRow>(
       `UPDATE drive_copies
-       SET share_count = share_count + 1, last_share_at = now()
+       SET share_count = share_count + 1, last_share_at = $4
        WHERE tenant_id = $1 AND file_id = $2 AND id = $3
        RETURNING *`,
-      [tenantId, fileId, copyId],
+      [tenantId, fileId, copyId, now],
     );
     return rows[0];
   },

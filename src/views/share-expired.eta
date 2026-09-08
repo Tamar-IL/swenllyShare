@@ -1,0 +1,6 @@
+<%/* Placeholder view. No data — a generic "this link no longer works" page, deliberately
+    undifferentiated between "expired" and "never existed" (no enumeration). */%>
+<main>
+  <h1>הקובץ אינו זמין</h1>
+  <p>הקישור פג תוקף או שהקובץ אינו קיים יותר.</p>
+</main>

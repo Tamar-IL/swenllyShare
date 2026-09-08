@@ -1,0 +1,14 @@
+<%/* Placeholder view. Data contract:
+      it.csrfToken       string — sent by the island as the x-csrf-token XHR header
+      it.maxUploadBytes  number — MAX_UPLOAD_BYTES, for client-side pre-flight only
+                                  (the server enforces its own cap regardless)
+*/%>
+<main>
+  <h1>העלאת קובץ</h1>
+  <form id="upload-form" data-csrf="<%= it.csrfToken %>" data-max-bytes="<%= it.maxUploadBytes %>">
+    <input type="file" name="file" id="file-input" required />
+    <button type="submit">העלה</button>
+  </form>
+  <div id="upload-progress" role="status" hidden></div>
+  <script src="/assets/island.js"></script>
+</main>

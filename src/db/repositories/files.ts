@@ -200,4 +200,35 @@ export const files = {
     ]);
     return rows[0];
   },
+
+  /**
+   * The `staging.purge` job's sweep (architecture.md §6): files whose staged blob is past
+   * the retention window and above the attachment limit (a file at or below the limit
+   * keeps its blob for life — it's the attachment source). System-wide, not tenant-scoped
+   * by a request, but every returned row still carries its own `tenant_id` for the
+   * caller's subsequent tenant-scoped writes.
+   */
+  async listStagingPurgeCandidates(
+    db: Queryable,
+    params: { attachLimitBytes: number; olderThanHours: number; limit?: number },
+  ): Promise<FileRow[]> {
+    const { rows } = await db.query<FileRow>(
+      `SELECT * FROM files
+       WHERE staging_blob_id IS NOT NULL
+         AND size_bytes > $1
+         AND status IN ('ready', 'failed', 'expired', 'deleted')
+         AND created_at <= now() - ($2 || ' hours')::interval
+       ORDER BY created_at
+       LIMIT $3`,
+      [params.attachLimitBytes, params.olderThanHours, params.limit ?? 100],
+    );
+    return rows;
+  },
+
+  async clearStagingBlob(db: Queryable, tenantId: string, fileId: string): Promise<void> {
+    await db.query('UPDATE files SET staging_blob_id = NULL WHERE tenant_id = $1 AND id = $2', [
+      tenantId,
+      fileId,
+    ]);
+  },
 };

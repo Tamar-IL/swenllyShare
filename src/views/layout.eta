@@ -1,0 +1,14 @@
+<%/* Data contract (architecture.md §11 — placeholder only, the frontend engineer owns the
+    real markup/CSS): it.title (string, page title), it.body (string, raw HTML — the
+    rendered content template, injected via @fastify/view's Eta layout support). */%>
+<!doctype html>
+<html lang="he" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title><%= it.title %> · Swenlly Share</title>
+  </head>
+  <body>
+    <%~ it.body %>
+  </body>
+</html>

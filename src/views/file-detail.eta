@@ -1,0 +1,78 @@
+<%/* Placeholder view. Data contract:
+      it.file {
+        id: string, displayName: string, status: string,
+        customMessage: string|null, expiryMode: 'none'|'days'|'custom',
+        expiresAtIso: string|null, allowlistMode: 'open'|'allowlist',
+        allowlist: string[]
+      }
+      it.distributionUrl  string|undefined  — undefined while still publishing
+      it.mailtoUrl        string            — the pre-filled request mailto: link
+      it.csrfToken        string
+      it.flash            string|undefined  — one-shot message after a settings save
+      it.dmarcNote        string            — the sender-facing DMARC caveat (UX brief §3)
+*/%>
+<main>
+  <h1><%= it.file.displayName %></h1>
+  <% if (it.flash) { %>
+  <p role="status"><%= it.flash %></p>
+  <% } %>
+  <p>סטטוס: <%= it.file.status %></p>
+  <% if (it.distributionUrl) { %>
+  <p>קישור להפצה: <a href="<%= it.distributionUrl %>"><%= it.distributionUrl %></a></p>
+  <% } %>
+  <p>קישור לבקשת הקובץ במייל: <a href="<%= it.mailtoUrl %>"><%= it.mailtoUrl %></a></p>
+  <p><small><%= it.dmarcNote %></small></p>
+
+  <form method="post" action="/files/<%= it.file.id %>/settings">
+    <input type="hidden" name="_csrf" value="<%= it.csrfToken %>" />
+    <label>שם תצוגה <input name="displayName" value="<%= it.file.displayName %>" /></label>
+    <label>הודעה אישית <textarea name="customMessage"><%= it.file.customMessage || '' %></textarea></label>
+
+    <fieldset>
+      <legend>תפוגה</legend>
+      <label
+        ><input type="radio" name="expiryMode" value="none" <%= it.file.expiryMode === 'none' ? 'checked' : '' %> />
+        ללא תפוגה</label
+      >
+      <label
+        ><input type="radio" name="expiryMode" value="days" <%= it.file.expiryMode === 'days' ? 'checked' : '' %> />
+        בעוד <input type="number" name="expiryDays" min="1" /> ימים</label
+      >
+      <label
+        ><input type="radio" name="expiryMode" value="custom" <%= it.file.expiryMode === 'custom' ? 'checked' : '' %> />
+        תאריך <input type="date" name="expiresAt" value="<%= it.file.expiresAtIso || '' %>"
+      /></label>
+    </fieldset>
+
+    <fieldset>
+      <legend>הרשאת גישה</legend>
+      <label
+        ><input type="radio" name="allowlistMode" value="open" <%= it.file.allowlistMode === 'open' ? 'checked' : '' %> />
+        פתוח לכולם</label
+      >
+      <label
+        ><input
+          type="radio"
+          name="allowlistMode"
+          value="allowlist"
+          <%= it.file.allowlistMode === 'allowlist' ? 'checked' : '' %>
+        />
+        רשימת היתר בלבד</label
+      >
+      <textarea name="allowlist" placeholder="user@example.com&#10;@example.com"><%= it.file.allowlist.join('\n') %></textarea>
+    </fieldset>
+
+    <button type="submit">שמירה</button>
+  </form>
+
+  <form method="post" action="/files/<%= it.file.id %>/delete">
+    <input type="hidden" name="_csrf" value="<%= it.csrfToken %>" />
+    <button type="submit">מחיקה</button>
+  </form>
+
+  <section id="deliveries" data-file-id="<%= it.file.id %>">
+    <h2>יומן בקשות</h2>
+    <ul></ul>
+  </section>
+  <script src="/assets/island.js"></script>
+</main>
