@@ -18,6 +18,11 @@ export function registerHealthRoutes(app: FastifyInstance, container: Container)
       // Fix pass 5, F-C: files whose expiry could not be enforced and is still stuck —
       // see src/domain/health.ts's doc comment.
       const strandedExpiries = await container.services.health.countStrandedExpiries();
+      // Fix pass 6, critic N-2: ambiguous sends are an operator signal, not a dead end.
+      const unconfirmedDeliveries = await container.services.health.countUnconfirmedDeliveries();
+      if (unconfirmedDeliveries > 0) {
+        app.log.warn({ unconfirmedDeliveries }, 'readyz: deliveries with unconfirmed outcome');
+      }
 
       // F-5 (docs/security/red-team-report.md, RT-50..RT-54): a handler that's never
       // scheduled isn't a control — this surfaces "the recurring sweeps are actually
@@ -34,7 +39,15 @@ export function registerHealthRoutes(app: FastifyInstance, container: Container)
         if (!healthy) sweepsHealthy = false;
       }
 
-      return { ok: true, db: true, pendingJobs, sweepsHealthy, sweeps, strandedExpiries };
+      return {
+        ok: true,
+        db: true,
+        pendingJobs,
+        sweepsHealthy,
+        sweeps,
+        strandedExpiries,
+        unconfirmedDeliveries,
+      };
     } catch (err) {
       app.log.error({ err }, 'readyz: database check failed');
       reply.code(503);
@@ -45,6 +58,7 @@ export function registerHealthRoutes(app: FastifyInstance, container: Container)
         sweepsHealthy: false,
         sweeps: {},
         strandedExpiries: 0,
+        unconfirmedDeliveries: 0,
       };
     }
   });

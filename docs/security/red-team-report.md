@@ -408,10 +408,16 @@ array is present in the payload — from Mailgun's own synthetic top-level field
 `INBOUND_DOMAIN`, which is public and guessable — the exact value the critic's forged payloads
 exploited). When `message-headers` is absent, every auth field reads `unknown` and the request is
 quarantined, full stop — the old top-level-only `Authentication-Results` fallback was deleted
-entirely, not hardened, because it was never reachable safely. `INBOUND_AUTH_SOURCE`
-(`authentication-results|mailgun-fields|both`, default `both`) selects which recognized source(s)
-run; `INBOUND_REQUESTS_ENABLED` now defaults `false` (was `true`) — a kill switch built for an
-unverified assumption defaults to the safe position.
+entirely, not hardened, because it was never reachable safely. **Fix pass 6 (critic F-B
+re-check):** `INBOUND_AUTH_SOURCE` (`mailgun-fields`, default | `authentication-results`) names
+exactly ONE authoritative source — there is no `both` and no fallback between sources; a
+collision between a synthetic field name and a MIME header name, two `Authentication-Results`
+entries naming our authserv-id (any order), a DNS-suffix authserv-id, or the two sources
+disagreeing all yield `unknown` → quarantine. `INBOUND_REQUESTS_ENABLED` defaults `false` — a
+kill switch built for an unverified assumption defaults to the safe position. Residual,
+stated: in `authentication-results` mode a single forged entry is indistinguishable from a
+genuine stamp when Mailgun stamps none; that mode is permitted only after spike 3c proves
+Mailgun stamps its own header on every message (`docs/runbooks/live-spikes.md`).
 Tests: `RT-01`, `RT-01b`, `RT-05` (auth-gate-bypass.test.ts) + `tests/unit/mailgun-mapping.test.ts`
 (both the original `message-headers`-path coverage and, since fix pass 5, a dedicated "critic four
 probe payloads A-D" suite at both the mapper and pipeline level —

@@ -154,11 +154,14 @@ const baseConfigSchema = z.object({
   // (docs/runbooks/live-spikes.md spike #3) — `container.ts` falls back to `INBOUND_DOMAIN`
   // when this is unset, which is a documented guess, not a confirmed fact.
   MAILGUN_AUTHSERV_ID: z.string().optional(),
-  // F-1: which source(s) `mapMailgunInboundPayload` trusts for DMARC/SPF/DKIM. See
-  // mapping.ts's doc comment for what each value means; `both` (default) prefers the
-  // Authentication-Results-header path and falls back to the classic lowercase Mailgun
-  // fields only when that path yields nothing.
-  INBOUND_AUTH_SOURCE: z.enum(['authentication-results', 'mailgun-fields', 'both']).default('both'),
+  // F-B (fix pass 6): which ONE source `mapMailgunInboundPayload` trusts for DMARC/SPF/DKIM
+  // — `mailgun-fields` (Mailgun's synthetic top-level fields) or `authentication-results`
+  // (the RFC 8601 header inside `message-headers`, exact authserv-id match). No `both`: a
+  // fallback between sources is a second door an attacker can choose. Set after spike 3
+  // (docs/runbooks/live-spikes.md) shows which signal Mailgun actually provides.
+  INBOUND_AUTH_SOURCE: z
+    .enum(['authentication-results', 'mailgun-fields'])
+    .default('mailgun-fields'),
   // F-1 kill switch: the inbound email-request path stays gated behind this until a live
   // Mailgun payload has been captured and the auth-results field guess above is confirmed
   // (architecture.md §12's unverified item). `false` still 401/406s on a bad signature or

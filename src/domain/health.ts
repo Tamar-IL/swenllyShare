@@ -1,6 +1,7 @@
 import type { Pool } from '../db/pool.js';
 import { jobs } from '../db/repositories/jobs.js';
 import { files } from '../db/repositories/files.js';
+import { deliveries } from '../db/repositories/deliveries.js';
 
 /**
  * Read-side ops primitives for `GET /readyz` (architecture.md §2 boundary rule 1: HTTP
@@ -29,5 +30,12 @@ export class HealthService {
    * only that nothing is CURRENTLY stuck. */
   async countStrandedExpiries(): Promise<number> {
     return files.countStrandedExpiries(this.pool);
+  }
+
+  /** Fix pass 6 (critic N-2): deliveries finalized `unconfirmed` (an ambiguous send —
+   * see `delivery-fulfill.ts`). Surfaced so a deploy-restart that strands a delivery is
+   * visible to the operator rather than silently absorbed into the audit log. */
+  async countUnconfirmedDeliveries(): Promise<number> {
+    return deliveries.countUnconfirmed(this.pool);
   }
 }

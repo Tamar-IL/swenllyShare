@@ -40,7 +40,7 @@ describe('loadConfig', () => {
     // F-1/F-7/F-8/F-10 (red-team fixes) — see docs/security/red-team-report.md.
     expect(config.RATE_DOMAIN_PER_HOUR).toBe(30);
     expect(config.QUARANTINE_PER_TOKEN_PER_HOUR).toBe(5);
-    expect(config.INBOUND_AUTH_SOURCE).toBe('both');
+    expect(config.INBOUND_AUTH_SOURCE).toBe('mailgun-fields');
     // Fix pass 5, F-B (docs/reviews/critic-report.md): a kill switch that defaults ON is
     // not a kill switch — default flipped false.
     expect(config.INBOUND_REQUESTS_ENABLED).toBe(false);

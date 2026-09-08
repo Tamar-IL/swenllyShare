@@ -11,7 +11,10 @@ import {
  * populates `message-headers` in any of its payloads, so it only exercises the degraded
  * top-level-field fallback and the `mailgun-fields` source — this file closes that gap.
  */
-const CONFIG: MailgunMappingConfig = { authservId: 'mx.example.test', authSource: 'both' };
+const CONFIG: MailgunMappingConfig = {
+  authservId: 'mx.example.test',
+  authSource: 'authentication-results',
+};
 
 describe('mapMailgunInboundPayload — Authentication-Results / message-headers', () => {
   it('reads dmarc/spf/dkim/dmarcDomain from a message-headers entry matching authservId', () => {
@@ -46,7 +49,7 @@ describe('mapMailgunInboundPayload — Authentication-Results / message-headers'
     expect(mapMailgunInboundPayload(payload, CONFIG).dmarc).toBe('pass');
   });
 
-  it('takes the TOPMOST Authentication-Results entry whose authserv-id matches, skipping others', () => {
+  it('uses the single Authentication-Results entry naming our authserv-id, ignoring foreign ones', () => {
     const payload = {
       recipient: 'cust-abc123+file-def456@share.swenlly.test',
       From: 'ceo@corp.test',
@@ -58,21 +61,72 @@ describe('mapMailgunInboundPayload — Authentication-Results / message-headers'
         ['Authentication-Results', 'mx.example.test; dmarc=fail header.from=corp.test'],
       ]),
     };
-    // Our own entry is what gets used, even though it's not literally first in the
-    // array — the attacker-claimed authserv-id never matches and is skipped.
+    // Our own entry is what gets used — the foreign authserv-id never matches and is
+    // ignored, and since exactly ONE entry names ours there is no ambiguity.
     expect(mapMailgunInboundPayload(payload, CONFIG).dmarc).toBe('fail');
   });
 
-  it('matches an authserv-id as a DNS suffix of the configured host (mxa.<host> vs <host>)', () => {
+  it('fix pass 6 (critic C\u2033): a DNS-suffix authserv-id (mxa.<host>, evil.<host>) does NOT match', () => {
     const payload = {
       recipient: 'cust-abc123+file-def456@share.swenlly.test',
       From: 'ceo@corp.test',
       token: 'tok-1',
       'message-headers': JSON.stringify([
-        ['Authentication-Results', 'mxa.mx.example.test; dmarc=pass header.from=corp.test'],
+        ['Authentication-Results', 'evil.mx.example.test; dmarc=pass header.from=corp.test'],
       ]),
     };
-    expect(mapMailgunInboundPayload(payload, CONFIG).dmarc).toBe('pass');
+    expect(mapMailgunInboundPayload(payload, CONFIG).dmarc).toBe('unknown');
+  });
+
+  it('fix pass 6 (critic F-B): TWO Authentication-Results naming our authserv-id is ambiguous -> unknown, whichever order', () => {
+    const entries: [string, string][] = [
+      ['Authentication-Results', 'mx.example.test; dmarc=pass header.from=corp.test'],
+      ['Authentication-Results', 'mx.example.test; dmarc=fail header.from=corp.test'],
+    ];
+    for (const order of [entries, [...entries].reverse()]) {
+      const payload = {
+        recipient: 'cust-abc123+file-def456@share.swenlly.test',
+        From: 'ceo@corp.test',
+        token: 'tok-1',
+        'message-headers': JSON.stringify(order),
+      };
+      expect(mapMailgunInboundPayload(payload, CONFIG).dmarc).toBe('unknown');
+    }
+  });
+
+  it('fix pass 6 (critic N-1): in authentication-results mode a colliding synthetic field name makes the verdict unknown, never a fallthrough', () => {
+    const payload = {
+      recipient: 'cust-abc123+file-def456@share.swenlly.test',
+      From: 'attacker@evil.test',
+      token: 'tok-1',
+      Dmarc: 'pass',
+      'message-headers': JSON.stringify([
+        ['Dmarc', 'pass'],
+        ['Authentication-Results', 'mx.example.test; dmarc=pass header.from=evil.test'],
+      ]),
+    };
+    expect(mapMailgunInboundPayload(payload, CONFIG).dmarc).toBe('unknown');
+  });
+
+  it('fix pass 6: the two sources disagreeing on DMARC -> unknown in either mode', () => {
+    const payload = {
+      recipient: 'cust-abc123+file-def456@share.swenlly.test',
+      From: 'attacker@evil.test',
+      token: 'tok-1',
+      dmarc: 'fail',
+      'dmarc-domain': 'evil.test',
+      'message-headers': JSON.stringify([
+        ['From', 'attacker@evil.test'],
+        ['Authentication-Results', 'mx.example.test; dmarc=pass header.from=evil.test'],
+      ]),
+    };
+    for (const authSource of ['mailgun-fields', 'authentication-results'] as const) {
+      const parsed = mapMailgunInboundPayload(payload, {
+        authservId: 'mx.example.test',
+        authSource,
+      });
+      expect(parsed.dmarc).toBe('unknown');
+    }
   });
 
   it('F-1: a mailgun-fields candidate duplicated in message-headers is NOT trusted', () => {
@@ -137,7 +191,7 @@ describe('mapMailgunInboundPayload — Authentication-Results / message-headers'
       recipient: 'cust-abc123+file-def456@share.swenlly.test',
       From: 'sender@corp.test',
       token: 'tok-1',
-      dmarc: 'pass', // would be trusted under mailgun-fields/both, but not this source
+      dmarc: 'pass', // would be trusted under mailgun-fields, but not this source
     };
     const parsed = mapMailgunInboundPayload(payload, {
       authservId: 'mx.example.test',
@@ -168,7 +222,10 @@ describe('mapMailgunInboundPayload — Authentication-Results / message-headers'
    */
   describe('fix pass 5, F-B: the critic four probe payloads (A-D)', () => {
     const REAL_AUTHSERV_ID = 'mxa.swenlly-mail.example';
-    const PROBE_CONFIG: MailgunMappingConfig = { authservId: REAL_AUTHSERV_ID, authSource: 'both' };
+    const PROBE_CONFIG: MailgunMappingConfig = {
+      authservId: REAL_AUTHSERV_ID,
+      authSource: 'authentication-results',
+    };
     const base = {
       recipient: 'cust-abc123+file-def456@share.swenlly.test',
       From: 'attacker@evil.test',
@@ -207,21 +264,59 @@ describe('mapMailgunInboundPayload — Authentication-Results / message-headers'
       expect(parsed.dmarc).toBe('unknown');
     });
 
-    it("D: message-headers present with a genuine dmarc=fail on top and the attacker's pass below -> fail (defense holds)", () => {
+    it("D: message-headers present with a genuine dmarc=fail on top and the attacker's pass below -> unknown (two entries name our authserv-id: ambiguous, quarantined either way)", () => {
       const payload = {
         ...base,
         'message-headers': JSON.stringify([
           ['From', 'attacker@evil.test'],
-          // Mailgun's own, genuine stamp — matches the real authserv-id, and (per
-          // receipt order) sits ABOVE anything the original message itself carried.
           ['Authentication-Results', `${REAL_AUTHSERV_ID}; dmarc=fail header.from=evil.test`],
-          // The attacker's own forged entry, further down — also names the real
-          // authserv-id, but is correctly skipped: the TOPMOST match wins.
           ['Authentication-Results', `${REAL_AUTHSERV_ID}; dmarc=pass header.from=evil.test`],
         ]),
       };
+      // Fix pass 6: stricter than "topmost wins" — the presence of a second entry naming
+      // our authserv-id is itself evidence of forgery, and the result must not depend on
+      // whether the receiving MTA prepends or appends. Still a quarantine.
       const parsed = mapMailgunInboundPayload(payload, PROBE_CONFIG);
-      expect(parsed.dmarc).toBe('fail');
+      expect(parsed.dmarc).toBe('unknown');
+    });
+
+    it('C\u2032: message-headers present, Mailgun stamps nothing, attacker forges ONE Authentication-Results naming the REAL authserv-id -> unknown in mailgun-fields mode (no synthetic field vouches for it)', () => {
+      const payload = {
+        ...base,
+        'message-headers': JSON.stringify([
+          ['From', 'attacker@evil.test'],
+          ['Authentication-Results', `${REAL_AUTHSERV_ID}; dmarc=pass header.from=evil.test`],
+        ]),
+      };
+      const parsed = mapMailgunInboundPayload(payload, {
+        authservId: REAL_AUTHSERV_ID,
+        authSource: 'mailgun-fields',
+      });
+      expect(parsed.dmarc).toBe('unknown');
+      // Documented residual: in authentication-results mode this exact payload is
+      // indistinguishable from a genuine single stamp. That mode is only permitted once
+      // spike 3 proves Mailgun always stamps its own header (mapping.ts doc comment).
+    });
+
+    it('F: attacker adds a MIME header named `Dmarc:` -> the synthetic source is ambiguous -> unknown, never a fallthrough to a weaker source', () => {
+      const payload = {
+        ...base,
+        dmarc: 'fail', // Mailgun's genuine synthetic verdict
+        'dmarc-domain': 'evil.test',
+        Dmarc: 'pass', // the attacker's MIME header, flattened
+        'message-headers': JSON.stringify([
+          ['From', 'attacker@evil.test'],
+          ['Dmarc', 'pass'],
+          ['Authentication-Results', `${REAL_AUTHSERV_ID}; dmarc=pass header.from=evil.test`],
+        ]),
+      };
+      for (const authSource of ['mailgun-fields', 'authentication-results'] as const) {
+        const parsed = mapMailgunInboundPayload(payload, {
+          authservId: REAL_AUTHSERV_ID,
+          authSource,
+        });
+        expect(parsed.dmarc).toBe('unknown');
+      }
     });
   });
 });

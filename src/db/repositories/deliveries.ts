@@ -188,6 +188,18 @@ export const deliveries = {
    * — the list can hold up to 100 files (`files.list`'s default limit), so N+1 queries
    * would be the wrong shape for a page render.
    */
+  /**
+   * Fix pass 6 (critic N-2): deliveries that finalized `unconfirmed` — "we may or may
+   * not have sent this" — are an operator signal, not a dead end. Cross-tenant on purpose:
+   * this is an ops counter for `/readyz`, not a tenant view; it exposes a number only.
+   */
+  async countUnconfirmed(db: Queryable): Promise<number> {
+    const { rows } = await db.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM deliveries WHERE outcome = 'unconfirmed'",
+    );
+    return Number(rows[0]?.count ?? '0');
+  },
+
   async countsSentByTenant(db: Queryable, tenantId: string): Promise<Map<string, number>> {
     const { rows } = await db.query<{ file_id: string; count: string }>(
       `SELECT file_id, count(*)::text AS count FROM deliveries

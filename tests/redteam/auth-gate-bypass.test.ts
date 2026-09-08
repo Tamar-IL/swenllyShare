@@ -243,7 +243,12 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — inbound auth gate (AC-R1/AC-R3
   it.each(['pass', 'Pass', 'PASS', '  pass  ', ' PASS '])(
     'DOCUMENTED: dmarc=%j is accepted (case- and whitespace-tolerant, not a bypass)',
     async (dmarcValue) => {
-      const container = buildTestContainer();
+      // Fix pass 6 (critic F-B re-check): the verdict comes from ONE operator-chosen source
+      // with no fallback. This case supplies its pass via an `Authentication-Results`
+      // header only, so it must run in `authentication-results` mode — in the default
+      // `mailgun-fields` mode a lone A-R header vouches for nothing (see C′ in
+      // tests/review/dmarc-gate-payloads-a-d.test.ts).
+      const container = buildTestContainer({ INBOUND_AUTH_SOURCE: 'authentication-results' });
       const { tenant, file } = await createTenantWithReadyFile(
         container,
         `rt-ok-${Buffer.from(dmarcValue).toString('hex')}@example.com`,
@@ -278,8 +283,8 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — inbound auth gate (AC-R1/AC-R3
     // Pins the positive control for the whole file. F-2 hardening: a `pass` MUST carry an
     // evaluated `header.from` domain to be accepted at all (see DOCUMENTED cases' comment
     // above) — this is a real provider-asserted `Authentication-Results` pass, not a
-    // domain-less one.
-    const container = buildTestContainer();
+    // domain-less one. Fix pass 6: A-R-only payload ⇒ `authentication-results` mode.
+    const container = buildTestContainer({ INBOUND_AUTH_SOURCE: 'authentication-results' });
     const { tenant, file } = await createTenantWithReadyFile(container, 'rt-ws@example.com');
     const payload = buildSignedWebhookPayload(container, {
       requestToken: file.request_token,

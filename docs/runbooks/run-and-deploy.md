@@ -78,6 +78,15 @@ CI (`.github/workflows/ci.yml`) runs typecheck → lint → prettier check → u
    payload and confirmed the DMARC/SPF/DKIM field-name guess in
    `src/adapters/mailgun/mapping.ts` against it — flipping it on a guess reopens the exact
    forgeable-gate risk the kill switch exists to hold shut.
+   **Fix pass 6 (critic F-B re-check):** the authserv-id is Mailgun's PUBLIC hostname, so
+   configuring it correctly is necessary but not sufficient. You must also choose exactly
+   ONE `INBOUND_AUTH_SOURCE` from what spike 3b shows Mailgun actually provides —
+   `mailgun-fields` if the payload carries synthetic top-level `dmarc`/`dmarc-domain`
+   fields, `authentication-results` only if spike 3c proves Mailgun stamps its own
+   `Authentication-Results` on EVERY message (including one that already carries a forged
+   copy). There is no fallback between the two by design. If neither signal exists on your
+   plan, leave `INBOUND_REQUESTS_ENABLED=false`; the product still works for the
+   filtered-internet audience via the distribution link.
 5. **Mailgun Route:** `match_recipient("^cust-.*@<INBOUND_DOMAIN>$")` → forward to
    `POST https://<PUBLIC_BASE_URL>/webhooks/mailgun/inbound`. The webhook verifies Mailgun's
    HMAC signature before parsing anything (architecture §10) — `MAILGUN_SIGNING_KEY` must

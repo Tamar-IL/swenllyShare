@@ -101,7 +101,7 @@ link role) · `MAILGUN_API_BASE`/`_API_KEY`/`_SIGNING_KEY`/`_SENDING_DOMAIN`, `O
 `MAILGUN_AUTHSERV_ID` (fix pass 5, F-B: **required** whenever `ADAPTERS=real` or
 `INBOUND_REQUESTS_ENABLED=true` in production — `loadConfig` refuses to boot otherwise; must be a
 genuine Mailgun-assigned value, never `INBOUND_DOMAIN`, which is public and guessable),
-`INBOUND_AUTH_SOURCE`=both (which source(s) the DMARC mapper trusts).
+`INBOUND_AUTH_SOURCE`=mailgun-fields (the ONE source the DMARC mapper trusts; `authentication-results` is the alternative — no fallback between them).
 
 **Flags** — `BRANDED_PAGE_ENABLED`=false (branded page vs. raw Zoho link; `/s/*` 404s while off) ·
 `WORKER_ENABLED`=true · `INBOUND_REQUESTS_ENABLED`=false (kill switch, fix pass 5 default —

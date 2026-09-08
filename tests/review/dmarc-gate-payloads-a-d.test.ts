@@ -89,7 +89,7 @@ describe.skipIf(!hasTestDatabase())(
       expect(rows[0]?.reason).toBe('dmarc_unknown');
     });
 
-    it("D: message-headers present with a genuine dmarc=fail on top and the attacker's pass below -> quarantined dmarc_fail (defense holds)", async () => {
+    it("D: message-headers present with a genuine dmarc=fail on top and the attacker's pass below -> quarantined dmarc_unknown (fix pass 6: two entries naming our authserv-id is ambiguous)", async () => {
       const container = buildTestContainer();
       const { tenant, file } = await createTenantWithReadyFile(container, 'probe-d@example.com');
       const payload = buildSignedWebhookPayload(container, {
@@ -111,7 +111,82 @@ describe.skipIf(!hasTestDatabase())(
       expect(outcome.deliveryId).toBeUndefined();
       const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
       expect(rows[0]?.outcome).toBe('quarantined');
-      expect(rows[0]?.reason).toBe('dmarc_fail');
+      expect(rows[0]?.reason).toBe('dmarc_unknown');
+    });
+
+    it('C\u2032 (fix pass 6): attacker forges ONE Authentication-Results naming the REAL authserv-id, Mailgun stamps no synthetic field -> quarantined dmarc_unknown (mailgun-fields mode)', async () => {
+      const container = buildTestContainer({ INBOUND_AUTH_SOURCE: 'mailgun-fields' });
+      const { tenant, file } = await createTenantWithReadyFile(container, 'probe-c2@example.com');
+      const payload = buildSignedWebhookPayload(container, {
+        requestToken: file.request_token,
+        tenantSlug: tenant.slug,
+        fromAddress: 'attacker@evil.test',
+        includeMessageHeaders: false,
+      });
+      payload['message-headers'] = JSON.stringify([
+        ['From', payload.From],
+        [
+          'Authentication-Results',
+          `${container.config.MAILGUN_AUTHSERV_ID}; dmarc=pass header.from=evil.test`,
+        ],
+      ]);
+      const outcome = await container.services.requestPipeline.handleWebhook(payload);
+      expect(outcome.deliveryId).toBeUndefined();
+      const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
+      expect(rows[0]?.outcome).toBe('quarantined');
+      expect(rows[0]?.reason).toBe('dmarc_unknown');
+    });
+
+    it('C\u2033 (fix pass 6): a DNS-suffix authserv-id (evil.<ours>) never matches -> quarantined dmarc_unknown', async () => {
+      const container = buildTestContainer({ INBOUND_AUTH_SOURCE: 'authentication-results' });
+      const { tenant, file } = await createTenantWithReadyFile(container, 'probe-c3@example.com');
+      const payload = buildSignedWebhookPayload(container, {
+        requestToken: file.request_token,
+        tenantSlug: tenant.slug,
+        fromAddress: 'attacker@evil.test',
+        includeMessageHeaders: false,
+      });
+      payload['message-headers'] = JSON.stringify([
+        ['From', payload.From],
+        [
+          'Authentication-Results',
+          `evil.${container.config.MAILGUN_AUTHSERV_ID}; dmarc=pass header.from=evil.test`,
+        ],
+      ]);
+      const outcome = await container.services.requestPipeline.handleWebhook(payload);
+      expect(outcome.deliveryId).toBeUndefined();
+      const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
+      expect(rows[0]?.reason).toBe('dmarc_unknown');
+    });
+
+    it("F (fix pass 6, critic N-1): attacker adds a `Dmarc:` MIME header -> Mailgun's genuine dmarc=fail is not discarded into a weaker source; quarantined, delivery never enqueued", async () => {
+      for (const INBOUND_AUTH_SOURCE of ['mailgun-fields', 'authentication-results'] as const) {
+        await truncateAll();
+        const container = buildTestContainer({ INBOUND_AUTH_SOURCE });
+        const { tenant, file } = await createTenantWithReadyFile(container, 'probe-f@example.com');
+        const payload = buildSignedWebhookPayload(container, {
+          requestToken: file.request_token,
+          tenantSlug: tenant.slug,
+          fromAddress: 'attacker@evil.test',
+          dmarc: 'fail',
+          dmarcDomain: 'evil.test',
+          includeMessageHeaders: false,
+        });
+        payload.Dmarc = 'pass';
+        payload['message-headers'] = JSON.stringify([
+          ['From', payload.From],
+          ['Dmarc', 'pass'],
+          [
+            'Authentication-Results',
+            `${container.config.MAILGUN_AUTHSERV_ID}; dmarc=pass header.from=evil.test`,
+          ],
+        ]);
+        const outcome = await container.services.requestPipeline.handleWebhook(payload);
+        expect(outcome.deliveryId).toBeUndefined();
+        const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
+        expect(rows[0]?.outcome).toBe('quarantined');
+        expect(rows[0]?.reason).toBe('dmarc_unknown');
+      }
     });
   },
 );

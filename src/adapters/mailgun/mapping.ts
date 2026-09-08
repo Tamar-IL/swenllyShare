@@ -8,85 +8,71 @@ import { parseSingleMailbox } from '../../lib/email-address.js';
  * `token` are Mailgun's own stable, documented webhook field names (Routes / Store-and-
  * notify), not a guess.
  *
- * **F-1 (critical, `docs/security/red-team-report.md`), hardened further in fix pass 5
- * (F-B, `docs/reviews/critic-report.md`).** DMARC/SPF/DKIM used to be read by probing five
- * GUESSED key names (`dmarc`, `Dmarc`, `X-Mailgun-Dmarc-Result`, ...) in the same flat
- * payload namespace that ALSO carries the inbound message's own MIME headers — Mailgun's
- * inbound routes flatten every MIME header into the POST body alongside its synthetic
- * fields, so a requester who adds `X-Mailgun-Dmarc-Result: pass` to their own outgoing
- * message could assert their own authentication result. The F-1 fix narrowed this to two
- * sources — but F-B's re-check found the anti-forgery guard both sources rely on
- * (`knownHeaderNames`, derived entirely from `message-headers`) is INOPERATIVE whenever
- * `message-headers` is absent from the payload (a contemplated, documented condition, not
- * exotic), and that the weaker of the two sources was also the LESS validated one. Current
- * design, read top to bottom as strict priority:
+ * ## Authentication results — the threat model this file is written against
  *
- *   0. **Fail closed when `message-headers` is absent** (missing, unparseable, or empty).
- *      Both sources below depend entirely on it to tell a genuinely Mailgun-synthesized
- *      field apart from a flattened copy of the sender's own MIME header — with no
- *      `message-headers`, that guard cannot run at all, so NEITHER source is trusted and
- *      every auth field reads `unknown`/`null`. Consistent with `docs/lessons.md`'s rule:
- *      "a guard whose input is optional must fail closed."
- *   (a) The classic Mailgun-documented synthetic top-level fields (`dmarc`, `spf`,
- *       `dkim`, `dmarc-domain`) — kept ONLY in their exact lowercase, single/hyphenated-
- *       word form, Mailgun's own naming convention for its synthetic fields (`body-plain`,
- *       `message-headers`, `attachment-count`, ...). Tried FIRST (fix pass 5: the priority
- *       used to be reversed) because these are Mailgun's own computed metadata about the
- *       envelope, not a copy of anything from the message itself — genuinely
- *       un-spoofable, PROVIDED `message-headers` is present so the dedup guard below is
- *       operative: any field here is discarded if the same key ALSO names a
- *       `message-headers` entry (a duplicate there means the flattened top-level copy
- *       could just as easily be the attacker's own same-named MIME header — indistinguishable,
- *       so it is never trusted).
- *   (b) `Authentication-Results` — the actual RFC 8601 carrier a receiving MTA stamps —
- *       parsed from the `message-headers` JSON array Mailgun documents as carrying every
- *       MIME header in receipt order. Takes the FIRST (topmost) entry whose `authserv-id`
- *       names our receiving host (`MAILGUN_AUTHSERV_ID`, fix pass 5: now REQUIRED
- *       configuration, never defaulted to our own public `INBOUND_DOMAIN` — a value
- *       printed in every mailto link this product hands out, and therefore guessable),
- *       because a receiving MTA PREPENDS its own trace headers, so the topmost matching
- *       one is the most recently added. Tried only when (a) yields nothing.
+ * Mailgun's inbound routes flatten EVERY MIME header of the received message into the same
+ * POST namespace that carries Mailgun's own synthetic fields, and list those MIME headers
+ * again, in receipt order, in the `message-headers` JSON array. Everything a requester can
+ * type into their outgoing message therefore arrives here twice: once flattened (where it
+ * is indistinguishable from a synthetic field by name alone) and once inside
+ * `message-headers` (where it is labelled as a MIME header). The `authserv-id` a receiving
+ * MTA writes into `Authentication-Results` is its own PUBLIC hostname — anyone can put it
+ * in a forged header (`docs/reviews/critic-report.md` F-B re-check, attacks C′/C″/F).
  *
- *       Fix pass 5 DELETED the old "degraded fallback" — a bare top-level
- *       `payload['Authentication-Results']` field, read whenever `message-headers` lacked
- *       one — entirely. It performed no `authserv-id` check at all (the weaker path was
- *       the LESS validated one) and step 0 above already makes it unreachable in the one
- *       case it existed for (`message-headers` absent); keeping it around as dead,
- *       unvalidated code was itself a risk.
+ * The properties this code guarantees (F-1 → F-B, fix passes 5 and 6):
  *
- * `INBOUND_AUTH_SOURCE` (config) selects which of (a)/(b) run; default `both` tries (a)
- * first and falls back to (b) only when (a) yields nothing.
+ *   0. **No `message-headers`, no verdict.** Every auth field reads `unknown`/`null`.
+ *      Without the MIME-header list the flattened namespace cannot be classified at all.
+ *   1. **One explicit source, chosen by the operator after spike 3** (`INBOUND_AUTH_SOURCE`
+ *      = `mailgun-fields` | `authentication-results`). There is no "try one, fall back to
+ *      the other": a fallback is a second door, and an attacker who can jam the first door
+ *      gets to pick which one answers (critic N-1).
+ *   2. **Source (a), `mailgun-fields`** — Mailgun's synthetic `dmarc` / `spf` / `dkim` /
+ *      `dmarc-domain` fields (exact lowercase, Mailgun's naming convention). If ANY of those
+ *      four names also appears in `message-headers`, the source is AMBIGUOUS (the flattened
+ *      copy may be the sender's own header) and the verdict is `unknown` — never "skip
+ *      this field", never "try the other source".
+ *   3. **Source (b), `authentication-results`** — the RFC 8601 header, read ONLY from
+ *      `message-headers`. Trusted only when EXACTLY ONE entry names the configured
+ *      `MAILGUN_AUTHSERV_ID` by exact, case-insensitive string equality (no DNS-suffix
+ *      matching — attack C″). Two entries naming it ⇒ AMBIGUOUS ⇒ `unknown`, regardless of
+ *      order (so this does not depend on the receiving MTA prepending). Zero ⇒ absent.
+ *   4. **Cross-check, fail closed.** Whichever source is authoritative, if the OTHER source
+ *      is present and its DMARC verdict disagrees, the result is `unknown`; if the other
+ *      source is ambiguous, the result is `unknown`. A forged header can therefore only ever
+ *      DOWNGRADE a verdict (quarantine the attacker's own request), never upgrade it.
  *
- * **This is still `@unverified-live`** (architecture.md §12, `docs/runbooks/live-spikes.md`
- * spike #3): nobody on this project has inspected a real Mailgun inbound payload, so the
- * exact field name(s) above are the best-documented guess, not a confirmed fact. Until a
- * live payload is captured, `INBOUND_REQUESTS_ENABLED=false` (fix pass 5: now the schema
- * DEFAULT, not just an available switch) holds the inbound path closed with no code deploy
- * needed to hold or resume it (see `RequestPipeline`).
+ * **Residual, stated plainly (not fixable in code):** in `authentication-results` mode, if
+ * Mailgun does NOT stamp its own `Authentication-Results` on a message and the sender
+ * forges exactly one naming our public authserv-id, it is indistinguishable from a genuine
+ * stamp. That mode is therefore only safe if spike 3 (`docs/runbooks/live-spikes.md`)
+ * proves Mailgun stamps its own header on EVERY message — including one that already
+ * carries a forged copy (then there are two, and rule 3 quarantines). If spike 3 cannot
+ * prove that, use `mailgun-fields`; if Mailgun provides neither signal, the inbound path
+ * must stay closed (`INBOUND_REQUESTS_ENABLED=false`, the default).
+ *
+ * **This is still `@unverified-live`** (architecture.md §12): nobody on this project has
+ * inspected a real Mailgun inbound payload.
  */
 const DMARC_MAILGUN_FIELD = 'dmarc';
 const SPF_MAILGUN_FIELD = 'spf';
 const DKIM_MAILGUN_FIELD = 'dkim';
 const DMARC_DOMAIN_MAILGUN_FIELD = 'dmarc-domain';
+const MAILGUN_AUTH_FIELDS = [
+  DMARC_MAILGUN_FIELD,
+  SPF_MAILGUN_FIELD,
+  DKIM_MAILGUN_FIELD,
+  DMARC_DOMAIN_MAILGUN_FIELD,
+] as const;
 const AUTHENTICATION_RESULTS_HEADER = 'authentication-results';
 
-export type InboundAuthSource = 'authentication-results' | 'mailgun-fields' | 'both';
+export type InboundAuthSource = 'authentication-results' | 'mailgun-fields';
 
 export interface MailgunMappingConfig {
-  /** The receiving host name Mailgun's `Authentication-Results` header should name
-   * (RFC 8601 `authserv-id`). Matched by exact equality or as a DNS suffix (`authservId
-   * === configured || authservId.endsWith('.' + configured)`) so `mxa.<domain>`-shaped
-   * real-world values still match a `<domain>`-shaped config default. */
+  /** The receiving host name Mailgun's own `Authentication-Results` header names
+   * (RFC 8601 `authserv-id`). Matched by exact, case-insensitive equality only. */
   authservId: string;
   authSource: InboundAuthSource;
-}
-
-interface ParsedAuthResult {
-  authservId: string;
-  dmarc: 'pass' | 'fail' | 'none' | null;
-  spf: string | null;
-  dkim: string | null;
-  dmarcDomain: string | null;
 }
 
 interface AuthExtraction {
@@ -95,6 +81,14 @@ interface AuthExtraction {
   dkim: string | null;
   dmarcDomain: string | null;
 }
+
+/** One source's reading of the payload. `absent`: nothing there. `ambiguous`: something
+ * is there but an attacker could have put it there. `present`: a value this source
+ * vouches for. */
+type SourceReading =
+  | { status: 'absent' }
+  | { status: 'ambiguous'; why: string }
+  | { status: 'present'; auth: AuthExtraction };
 
 const EMPTY_AUTH: AuthExtraction = { dmarc: 'unknown', spf: null, dkim: null, dmarcDomain: null };
 
@@ -108,7 +102,10 @@ function normalizeDmarc(raw: string | undefined): 'pass' | 'fail' | 'none' | nul
  * grammar — just `authserv-id ; resinfo`, pulling `dmarc=`, `spf=`, `dkim=` and
  * `header.from=` out of `resinfo` by name). Returns nulls for anything not present rather
  * than guessing. */
-function parseAuthenticationResultsValue(value: string): ParsedAuthResult {
+function parseAuthenticationResultsValue(value: string): {
+  authservId: string;
+  auth: AuthExtraction;
+} {
   const semiIdx = value.indexOf(';');
   const authservId = (semiIdx === -1 ? value : value.slice(0, semiIdx)).trim().toLowerCase();
   const resinfo = semiIdx === -1 ? '' : value.slice(semiIdx + 1);
@@ -120,16 +117,19 @@ function parseAuthenticationResultsValue(value: string): ParsedAuthResult {
 
   return {
     authservId,
-    dmarc: normalizeDmarc(dmarcMatch?.[1]),
-    spf: spfMatch?.[1]?.toLowerCase() ?? null,
-    dkim: dkimMatch?.[1]?.toLowerCase() ?? null,
-    dmarcDomain: domainMatch?.[1]?.trim().toLowerCase() ?? null,
+    auth: {
+      dmarc: normalizeDmarc(dmarcMatch?.[1]) ?? 'unknown',
+      spf: spfMatch?.[1]?.toLowerCase() ?? null,
+      dkim: dkimMatch?.[1]?.toLowerCase() ?? null,
+      dmarcDomain: domainMatch?.[1]?.trim().toLowerCase() ?? null,
+    },
   };
 }
 
+/** Exact, case-insensitive equality only — a DNS-suffix match would let
+ * `evil.<our-host>` pass (critic F-B re-check, attack C″). */
 function authservIdMatches(candidate: string, configured: string): boolean {
-  const c = configured.trim().toLowerCase();
-  return candidate === c || candidate.endsWith(`.${c}`);
+  return candidate === configured.trim().toLowerCase();
 }
 
 /** Parses Mailgun's documented `message-headers` field — a JSON array of `[name, value]`
@@ -160,49 +160,60 @@ function messageHeaderNames(headers: [string, string][]): Set<string> {
   return new Set(headers.map(([name]) => name.toLowerCase()));
 }
 
-/** Source (b): the topmost `Authentication-Results` entry in `message-headers` whose
- * `authserv-id` names our own receiving host, per the module doc comment above. */
-function extractFromMessageHeadersArray(
-  headers: [string, string][],
-  authservId: string,
-): ParsedAuthResult | null {
+/** Source (b): `Authentication-Results` entries inside `message-headers`. Present only
+ * when exactly one entry names our authserv-id (rule 3 in the module doc comment). */
+function readAuthenticationResults(headers: [string, string][], authservId: string): SourceReading {
+  const ours: AuthExtraction[] = [];
   for (const [name, value] of headers) {
     if (name.toLowerCase() !== AUTHENTICATION_RESULTS_HEADER) continue;
     const parsed = parseAuthenticationResultsValue(value);
-    if (authservIdMatches(parsed.authservId, authservId)) return parsed;
+    if (authservIdMatches(parsed.authservId, authservId)) ours.push(parsed.auth);
   }
-  return null;
+  if (ours.length === 0) return { status: 'absent' };
+  if (ours.length > 1) {
+    return { status: 'ambiguous', why: 'multiple Authentication-Results name our authserv-id' };
+  }
+  return { status: 'present', auth: ours[0] as AuthExtraction };
 }
 
-/** Source (a): the classic lowercase Mailgun-field-shaped guesses, each discarded if the
- * same key also names a `message-headers` entry (see doc comment). */
-function extractFromMailgunFields(
+/** Source (a): Mailgun's synthetic top-level auth fields. Ambiguous if any of their names
+ * also appears as a MIME header of the message (rule 2). */
+function readMailgunFields(
   payload: Record<string, unknown>,
   knownHeaderNames: Set<string>,
-): AuthExtraction {
+): SourceReading {
+  const collisions = MAILGUN_AUTH_FIELDS.filter((key) => knownHeaderNames.has(key));
+  if (collisions.length > 0) {
+    return {
+      status: 'ambiguous',
+      why: `MIME header(s) collide with synthetic field(s): ${collisions.join(', ')}`,
+    };
+  }
   function field(key: string): string | null {
-    if (knownHeaderNames.has(key)) return null;
     const value = payload[key];
     return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
   }
-  return {
-    dmarc: normalizeDmarc(field(DMARC_MAILGUN_FIELD) ?? undefined) ?? 'unknown',
+  const dmarcRaw = field(DMARC_MAILGUN_FIELD);
+  const auth: AuthExtraction = {
+    dmarc: normalizeDmarc(dmarcRaw ?? undefined) ?? 'unknown',
     spf: field(SPF_MAILGUN_FIELD),
     dkim: field(DKIM_MAILGUN_FIELD),
     dmarcDomain: field(DMARC_DOMAIN_MAILGUN_FIELD),
   };
+  const anySignal =
+    dmarcRaw !== null || auth.spf !== null || auth.dkim !== null || auth.dmarcDomain !== null;
+  return anySignal ? { status: 'present', auth } : { status: 'absent' };
 }
 
-/** Whether an `AuthExtraction` actually carries a signal (vs. the all-empty shape a miss
- * returns) — used to decide whether source (a) already answered the question, or whether
- * `both` should still fall through to source (b). */
-function hasAuthSignal(extraction: AuthExtraction): boolean {
-  return (
-    extraction.dmarc !== 'unknown' ||
-    extraction.spf !== null ||
-    extraction.dkim !== null ||
-    extraction.dmarcDomain !== null
-  );
+/** Rule 4: the authoritative source's verdict, unless the other source is ambiguous or
+ * present-and-disagreeing on DMARC — then `unknown`. */
+function combine(authoritative: SourceReading, other: SourceReading): AuthExtraction {
+  if (authoritative.status !== 'present') return EMPTY_AUTH;
+  if (other.status === 'ambiguous') return EMPTY_AUTH;
+  if (other.status === 'present' && other.auth.dmarc !== authoritative.auth.dmarc) {
+    return EMPTY_AUTH;
+  }
+  return authoritative.auth;
 }
 
 function extractAuthResult(
@@ -210,39 +221,20 @@ function extractAuthResult(
   config: MailgunMappingConfig,
 ): AuthExtraction {
   const headers = parseMessageHeaders(payload);
-  if (headers.length === 0) {
-    // Fix pass 5, F-B step 0 (module doc comment above): the anti-forgery dedup guard is
-    // derived entirely from `message-headers` — absent, neither source below can be told
-    // apart from an attacker's own MIME header occupying the same flat namespace. Fail
-    // closed rather than trust either one on a guess.
-    return EMPTY_AUTH;
-  }
+  if (headers.length === 0) return EMPTY_AUTH; // rule 0
   const knownHeaderNames = messageHeaderNames(headers);
 
-  if (config.authSource === 'mailgun-fields' || config.authSource === 'both') {
-    const fromFields = extractFromMailgunFields(payload, knownHeaderNames);
-    if (hasAuthSignal(fromFields)) return fromFields;
-    if (config.authSource === 'mailgun-fields') return EMPTY_AUTH;
-  }
+  const fields = readMailgunFields(payload, knownHeaderNames);
+  const authResults = readAuthenticationResults(headers, config.authservId);
 
-  if (config.authSource === 'authentication-results' || config.authSource === 'both') {
-    const authResult = extractFromMessageHeadersArray(headers, config.authservId);
-    if (authResult) {
-      return {
-        dmarc: authResult.dmarc ?? 'unknown',
-        spf: authResult.spf,
-        dkim: authResult.dkim,
-        dmarcDomain: authResult.dmarcDomain,
-      };
-    }
-  }
-
-  return EMPTY_AUTH;
+  return config.authSource === 'mailgun-fields'
+    ? combine(fields, authResults)
+    : combine(authResults, fields);
 }
 
 export const DEFAULT_MAILGUN_MAPPING_CONFIG: MailgunMappingConfig = {
   authservId: 'mailgun.org',
-  authSource: 'both',
+  authSource: 'mailgun-fields',
 };
 
 /**

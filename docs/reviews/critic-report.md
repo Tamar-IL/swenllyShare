@@ -854,3 +854,40 @@ Short. Re-run reproductions C′, C″ and F at the pipeline level; confirm a Ma
 field-name collision in `message-headers` yields `unknown` for the *whole* extraction; confirm
 the two rewritten C tests forge the *configured* authserv-id; confirm the four documents state
 the gate's real, current guarantee. Then this is SHIP-READY-FOR-LIVE-SPIKES.
+
+
+---
+
+## Fix pass 6 status (orchestrator, 2026-09-08) — response to the re-check
+
+**F-B (not closed at re-check) → fixed in `src/adapters/mailgun/mapping.ts`, tests at both levels.**
+The property now: the verdict comes from exactly ONE operator-chosen source
+(`INBOUND_AUTH_SOURCE=mailgun-fields` default, or `authentication-results`); `both` and every
+fallback between sources are gone (N-1). Each source is classified absent / ambiguous / present
+before use: a synthetic-field name that also appears in `message-headers` makes the synthetic
+source ambiguous; more than one `Authentication-Results` naming our authserv-id (any order, so
+no dependence on prepend) makes the header source ambiguous; the authserv-id matches by exact
+equality only (C″). Ambiguity in either source, or a DMARC disagreement between them, yields
+`unknown`. A forged header can therefore only ever downgrade a verdict.
+- C′ (forged single A-R naming the real authserv-id): quarantined `dmarc_unknown` in
+  `mailgun-fields` mode (`tests/review/dmarc-gate-payloads-a-d.test.ts`, mapper test in
+  `tests/unit/mailgun-mapping.test.ts`). In `authentication-results` mode it remains the stated
+  residual — indistinguishable from a genuine stamp when Mailgun stamps none — so that mode is
+  gated on spike 3c (`docs/runbooks/live-spikes.md`: send a request that already carries a forged
+  entry; two entries ⇒ Mailgun stamps on every message ⇒ mode permitted).
+- C″ (DNS-suffix authserv-id): `dmarc_unknown`, both levels.
+- F (attacker adds a `Dmarc:` MIME header): `dmarc_unknown` in both modes — the collision no
+  longer falls through to another source.
+- D now yields `dmarc_unknown` rather than `dmarc_fail` (two entries naming ours ⇒ ambiguous);
+  still a quarantine, strictly stricter, and order-independent.
+- The runbook (`run-and-deploy.md` 4a) now says the authserv-id is public, that ONE mode must be
+  chosen from what spike 3 shows, and that neither signal ⇒ keep the path closed. The four
+  documents state the property with its precondition.
+
+**N-1** — closed by the same change (no fallthrough exists).
+**N-2** — `unconfirmed` deliveries are counted in `/readyz` (`unconfirmedDeliveries`) and logged
+at `warn`; the row is visible in the sender's deliveries table as "לא מאומת". A one-click resend
+is not built (the requester can simply send the request again; each request is a new delivery).
+**N-3 / N-4** — not addressed in this pass; carried in the Minor list.
+
+Suite after fix pass 6: 348 passed, 7 live-gated skips, zero `it.fails`.

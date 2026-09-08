@@ -242,9 +242,9 @@ LIVE_MAILGUN=1 LIVE_MAILGUN_TEST_RECIPIENT=you@example.com \
 #          MIME header) — does it exist on your plan/route config? If so, does it contain
 #          an `Authentication-Results` entry, and does that entry's authserv-id (the part
 #          before the first `;`) match a real, stable hostname you can put in
-#          MAILGUN_AUTHSERV_ID? Also check whether there is more than one
-#          Authentication-Results entry (a forwarding hop) and confirm the TOPMOST one is
-#          genuinely the one your own receiving MTA added, not a passed-through one.
+#          MAILGUN_AUTHSERV_ID? (Fix pass 6: mapping.ts trusts an Authentication-Results
+#          entry only when EXACTLY ONE names that authserv-id by exact string equality —
+#          two such entries, in any order, are treated as forgery and quarantined.)
 #        - failing that, any top-level field that plausibly carries the DMARC/SPF/DKIM
 #          verdict directly (this is the `mailgun-fields` source in mapping.ts) — record
 #          its EXACT name and casing.
@@ -264,8 +264,26 @@ with the fake — it does **not** prove the auth-results extraction in `mapping.
 because `parse()` is a pure function over whatever payload you hand it. It is only actually
 confirmed by inspecting a **real captured payload** against
 `src/adapters/mailgun/mapping.ts`'s doc comment (the `(a)`/`(b)` source description) and
-`MAILGUN_AUTHSERV_ID`'s default (falls back to `INBOUND_DOMAIN` in `container.ts` — confirm
-whether the real authserv-id actually matches that, or needs setting explicitly).
+`MAILGUN_AUTHSERV_ID` (required, never defaulted — `container.ts` no longer falls back to
+`INBOUND_DOMAIN`).
+
+**3c — the forgery check (fix pass 6, critic F-B re-check; REQUIRED before choosing
+`INBOUND_AUTH_SOURCE=authentication-results`):** from a mailbox you control, send a request
+email that ALREADY carries a forged header `Authentication-Results: <MAILGUN_AUTHSERV_ID>;
+dmarc=pass header.from=<your-domain>` (most MUAs can't add raw headers — use `swaks`,
+`sendmail`, or a script). Then inspect the captured payload:
+- If Mailgun stamped its OWN `Authentication-Results` too, `message-headers` shows TWO
+  entries naming the authserv-id and the pipeline quarantines with `dmarc_unknown`. That
+  proves Mailgun stamps on every message and `authentication-results` mode is safe.
+- If only your forged entry is present, Mailgun does NOT stamp its own header, and
+  `authentication-results` mode is **forbidden** — a forged single entry would be accepted.
+  Use `mailgun-fields` (only if 3b found synthetic `dmarc`/`dmarc-domain` fields) or keep
+  the inbound path closed.
+Also confirm in 3b whether the synthetic fields, when present, survive a message that
+carries a MIME header of the same name (`Dmarc: pass`): the pipeline must quarantine it
+(`dmarc_unknown`, the collision rule) — if the payload shows only one `dmarc` value and no
+`Dmarc` entry in `message-headers`, Mailgun is overwriting rather than listing, and
+`mailgun-fields` mode is not safe either.
 
 **What to record:**
 1. Flip `@unverified-live` → `@verified-live(YYYY-MM-DD)` on `send` once 3a passes and the
@@ -278,7 +296,7 @@ whether the real authserv-id actually matches that, or needs setting explicitly)
 3. Run `pnpm gen:ledger` and commit `docs/verification-ledger.md`.
 4. **If the real payload's auth-results shape differs from `mapping.ts`'s `(a)`/`(b)`
    sources** (e.g. `message-headers` doesn't exist on your plan, or the real authserv-id
-   doesn't match `MAILGUN_AUTHSERV_ID`'s `INBOUND_DOMAIN` fallback, or the DMARC verdict
+   doesn't match the configured `MAILGUN_AUTHSERV_ID`, or the DMARC verdict
    lives under a field name `mailgun-fields` doesn't check), this is the most consequential
    fix in the whole spike list: update `src/adapters/mailgun/mapping.ts` (its extraction
    functions, not by adding back guessed Title-Case/`X-Mailgun-*` candidate names — see its
