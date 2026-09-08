@@ -102,6 +102,22 @@ names; discard everything else before mapping.
 **Consequence:** Closes the full auth bypass (RT-01/RT-05); the field-name guess itself remains
 `@unverified-live` until a live payload is captured (live-spikes runbook, spike 3).
 
+**Fix pass 5 correction (F-B, `docs/reviews/critic-report.md`):** the critic's re-check found
+this closed one payload shape out of four — the top-level "degraded fallback" performed no
+authserv-id check at all, and the anti-forgery guard (`knownHeaderNames`, derived entirely from
+`message-headers`) was inoperative whenever `message-headers` was simply absent, which is a
+documented, contemplated condition, not exotic. The property that now holds, stated with its
+precondition: **DMARC is read only from a provider-stamped source — Mailgun's own synthetic
+fields, or a `message-headers` `Authentication-Results` entry whose authserv-id exactly matches
+`MAILGUN_AUTHSERV_ID` — and ONLY when `message-headers` is present; when it is absent, every
+auth field reads `unknown` and the request is quarantined, never treated as a pass.** The
+top-level "degraded fallback" was deleted, not hardened — it was never reachable safely.
+`MAILGUN_AUTHSERV_ID` is now required configuration wherever it matters (real adapters, or the
+inbound path on in production) and NEVER defaults to `INBOUND_DOMAIN` (public, guessable — the
+exact value the critic's forged payloads exploited). `INBOUND_REQUESTS_ENABLED` now defaults
+`false` (was `true`) — a kill switch built for an unverified assumption must default to the safe
+position.
+
 ### 12. F-2 — DMARC alignment fails closed on a domain-less `pass` (orchestrator decision)
 **Context:** gate 6's alignment check silently no-ops when the evaluated domain can't be read,
 even though `dmarc` itself fails closed on the identical uncertainty — and two existing test pins

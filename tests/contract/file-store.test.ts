@@ -63,7 +63,11 @@ for (const scenario of scenarios) {
         const link = await port.createPublicLink(resourceId, { allowDownload: true });
         expect(link.linkId).toBeTruthy();
         expect(link.url).toBeTruthy();
-        expect(link.embedToken).toBeTruthy();
+        // Fix pass 5, F-E (docs/reviews/critic-report.md): `embedToken` is legitimately
+        // `null` when the provider's response carries no distinct embed identifier — the
+        // contract only requires it be a string OR null, never a value silently derived
+        // from `url`.
+        expect(link.embedToken === null || typeof link.embedToken === 'string').toBe(true);
 
         const stream = await port.openDownload(resourceId);
         const chunks: Buffer[] = [];

@@ -39,6 +39,16 @@ export function buildTestConfig(overrides: Partial<Config> = {}): Config {
     STAGING_DIR: mkdtempSync(path.join(os.tmpdir(), 'swenlly-staging-')),
     MAILGUN_SIGNING_KEY: TEST_SIGNING_KEY,
     ADAPTERS: 'fake',
+    // Fix pass 5, F-B (`docs/reviews/critic-report.md`): `INBOUND_REQUESTS_ENABLED` now
+    // defaults `false` in the schema (a kill switch that defaults on is not a kill
+    // switch) — almost every test in this suite exercises the inbound webhook path, so
+    // the shared test fixture turns it on explicitly, exactly as the fix note prescribes
+    // ("tests that need it on set it explicitly"). Tests that specifically want it OFF
+    // (tests/integration/inbound-kill-switch.test.ts) override it back per-test.
+    INBOUND_REQUESTS_ENABLED: true,
+    // A properly-configured, Mailgun-specific value — NOT derived from INBOUND_DOMAIN
+    // (see config.ts's own comment on why that fallback was the vulnerability).
+    MAILGUN_AUTHSERV_ID: 'mxa.mailgun.test',
     ...overrides,
   } as Record<string, string>);
 }

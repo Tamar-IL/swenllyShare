@@ -15,6 +15,9 @@ export function registerHealthRoutes(app: FastifyInstance, container: Container)
     try {
       await container.pool.query('SELECT 1');
       const pendingJobs = await container.services.health.countPendingJobs();
+      // Fix pass 5, F-C: files whose expiry could not be enforced and is still stuck —
+      // see src/domain/health.ts's doc comment.
+      const strandedExpiries = await container.services.health.countStrandedExpiries();
 
       // F-5 (docs/security/red-team-report.md, RT-50..RT-54): a handler that's never
       // scheduled isn't a control — this surfaces "the recurring sweeps are actually
@@ -31,11 +34,18 @@ export function registerHealthRoutes(app: FastifyInstance, container: Container)
         if (!healthy) sweepsHealthy = false;
       }
 
-      return { ok: true, db: true, pendingJobs, sweepsHealthy, sweeps };
+      return { ok: true, db: true, pendingJobs, sweepsHealthy, sweeps, strandedExpiries };
     } catch (err) {
       app.log.error({ err }, 'readyz: database check failed');
       reply.code(503);
-      return { ok: false, db: false, pendingJobs: 0, sweepsHealthy: false, sweeps: {} };
+      return {
+        ok: false,
+        db: false,
+        pendingJobs: 0,
+        sweepsHealthy: false,
+        sweeps: {},
+        strandedExpiries: 0,
+      };
     }
   });
 }

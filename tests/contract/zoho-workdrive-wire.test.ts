@@ -19,7 +19,11 @@ const API_ORIGIN = 'https://workdrive.zoho.test';
 const API_BASE = `${API_ORIGIN}/api/v1`;
 
 function buildStore(
-  overrides: { simpleUploadMaxBytes?: number; chunkSizeBytes?: number } = {},
+  overrides: {
+    simpleUploadMaxBytes?: number;
+    chunkSizeBytes?: number;
+    largeUploadEnabled?: boolean;
+  } = {},
 ): ZohoFileStore {
   return new ZohoFileStore({
     apiBase: API_BASE,
@@ -160,11 +164,35 @@ describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
     expect(capturedBody).not.toContain('\0');
   });
 
+  it('fix pass 5, F-G: upload refuses (PermanentError, no request sent) a file over the threshold unless largeUploadEnabled is true', async () => {
+    const disabledStore = buildStore({ simpleUploadMaxBytes: 10, chunkSizeBytes: 4 }); // largeUploadEnabled defaults false
+    const pool = mockAgent.get(API_ORIGIN);
+    let sessionInitCalled = false;
+    pool
+      .intercept({ path: pathnameIs('/api/v1/uploadlargefile/sessions'), method: 'POST' })
+      .reply(() => {
+        sessionInitCalled = true;
+        return { statusCode: 200, data: { data: { id: 'session-1' } } };
+      });
+
+    await expect(
+      disabledStore.upload('tenant-a', Readable.from(Buffer.from('0123456789A')), 11, 'huge.bin'),
+    ).rejects.toBeInstanceOf(PermanentError);
+    expect(sessionInitCalled).toBe(false);
+  });
+
   it('upload (large-file path): session init then ranged PUT chunks, finalizing on the last chunk', async () => {
     // Shrink both thresholds via the test-only config seam (see `ZohoFileStoreConfig`) so
     // this exercises real chunking logic against a few KB instead of allocating a real
     // 250MB+ buffer.
-    const smallChunkStore = buildStore({ simpleUploadMaxBytes: 10, chunkSizeBytes: 4 });
+    // Fix pass 5, F-G (docs/reviews/critic-report.md): the large-file path now refuses
+    // unless explicitly enabled — this test's whole point is exercising that path's wire
+    // shape, so it opts in.
+    const smallChunkStore = buildStore({
+      simpleUploadMaxBytes: 10,
+      chunkSizeBytes: 4,
+      largeUploadEnabled: true,
+    });
     const pool = mockAgent.get(API_ORIGIN);
     const content = Buffer.from('0123456789A'); // 11 bytes (> 10-byte threshold), chunked into 4+4+3
 
@@ -246,10 +274,12 @@ describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
         },
       },
     });
+    // Fix pass 5, F-E (docs/reviews/critic-report.md): no `embed_url`/`embed_link` in the
+    // response -> `embedToken: null`, never a value derived from `url`'s own path.
     expect(result).toEqual({
       linkId: 'link-1',
       url: 'https://workdrive.zoho.test/link/abc123',
-      embedToken: 'abc123',
+      embedToken: null,
     });
   });
 
@@ -357,21 +387,20 @@ describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
   });
 });
 
-describe('Zoho embed-token derivation and error classification (pure, no network)', () => {
+describe('Zoho embed-token extraction and error classification (pure, no network)', () => {
   it('extracts a token from an embed_url when present', () => {
-    const token = __testables.extractOrDeriveEmbedToken(
-      { embed_url: 'https://workdrive.zohoexternal.com/embed/abc123?toolbar=false' },
-      'https://workdrive.zoho.test/link/plain',
-    );
+    const token = __testables.extractEmbedToken({
+      embed_url: 'https://workdrive.zohoexternal.com/embed/abc123?toolbar=false',
+    });
     expect(token).toBe('abc123');
   });
 
-  it('falls back to the plain link’s trailing path segment when no embed field is present', () => {
-    const token = __testables.extractOrDeriveEmbedToken(
-      {},
-      'https://workdrive.zoho.test/link/plainTokenXYZ',
-    );
-    expect(token).toBe('plainTokenXYZ');
+  it('fix pass 5, F-E: returns null (never derives from the raw link) when no embed field is present', () => {
+    // docs/reviews/critic-report.md F-E: deriving from the plain link's own trailing path
+    // segment would put the raw link's identifying token right back into the branded
+    // page's iframe src — the exact leak AC-U3 exists to prevent.
+    const token = __testables.extractEmbedToken({});
+    expect(token).toBeNull();
   });
 
   it('sanitizeMultipartValue strips CR, LF, and NUL but leaves everything else intact', () => {

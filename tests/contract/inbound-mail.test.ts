@@ -71,6 +71,10 @@ for (const scenario of scenarios) {
         'Message-Id': '<contract-test@mailgun>',
         token: 'contract-test-token',
         dmarc: 'pass',
+        // Fix pass 5, F-B (docs/reviews/critic-report.md): the anti-forgery dedup guard
+        // requires `message-headers` to be present at all — a realistic Mailgun payload
+        // always carries SOME MIME headers here, this test's own `From` among them.
+        'message-headers': JSON.stringify([['From', 'Sender Name <sender@example.com>']]),
       });
 
       expect(parsed.recipientRaw).toBe('cust-abc123+file-def456@share.swenlly.com');

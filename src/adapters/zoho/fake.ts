@@ -12,7 +12,7 @@ interface FakeResource {
 interface FakeLink {
   resourceId: string;
   url: string;
-  embedToken: string;
+  embedToken: string | null;
   revoked: boolean;
 }
 
@@ -32,6 +32,16 @@ function nextId(prefix: string): string {
 export class FakeFileStore implements FileStorePort {
   readonly resources = new Map<string, FakeResource>();
   readonly links = new Map<string, FakeLink>();
+  /** Fix pass 5, F-E test seam: forces the NEXT `createPublicLink` call to return
+   * `embedToken: null`, the same shape the real adapter returns whenever Zoho's response
+   * carries no `embed_url`/`embed_link` field — lets tests exercise the branded page's
+   * no-iframe fallback (`GET /s/:slug`) through the normal publish flow instead of only
+   * via direct DB manipulation. One-shot, like `crashAfterNextCopy` on the Drive fake. */
+  private forceNullEmbedTokenNext = false;
+
+  forceNullEmbedTokenOnNextLink(): void {
+    this.forceNullEmbedTokenNext = true;
+  }
 
   async upload(
     tenantFolder: string,
@@ -52,7 +62,7 @@ export class FakeFileStore implements FileStorePort {
   async createPublicLink(
     resourceId: string,
     _opts: { allowDownload: boolean },
-  ): Promise<{ linkId: string; url: string; embedToken: string }> {
+  ): Promise<{ linkId: string; url: string; embedToken: string | null }> {
     if (!this.resources.has(resourceId)) {
       throw new NotFoundError(`fake zoho: no such resource ${resourceId}`);
     }
@@ -62,7 +72,8 @@ export class FakeFileStore implements FileStorePort {
     // is an opaque Zoho identifier unrelated to the internal resource id, and AC-U3 tests
     // that the branded page never leaks the raw resource id — an embed token that
     // literally contained it would make the fake fail to catch a real leak.
-    const embedToken = nextId('embed-tok');
+    const embedToken = this.forceNullEmbedTokenNext ? null : nextId('embed-tok');
+    this.forceNullEmbedTokenNext = false;
     this.links.set(linkId, { resourceId, url, embedToken, revoked: false });
     return { linkId, url, embedToken };
   }

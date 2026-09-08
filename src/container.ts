@@ -14,6 +14,7 @@ import { FakeDriveShare } from './adapters/google/fake.js';
 import { GoogleDriveShare } from './adapters/google/real.js';
 import { FakeInboundMail, FakeOutboundMail } from './adapters/mailgun/fake.js';
 import { MailgunInboundAdapter, MailgunOutboundAdapter } from './adapters/mailgun/real.js';
+import { DEFAULT_MAILGUN_MAPPING_CONFIG } from './adapters/mailgun/mapping.js';
 import { LocalDiskBlobStaging } from './adapters/staging/real.js';
 import { SystemClock, CryptoTokenGen } from './adapters/system/real.js';
 
@@ -151,6 +152,7 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
           teamFolderId: config.ZOHO_TEAM_FOLDER_ID ?? '',
           accountsBase: config.ZOHO_ACCOUNTS_BASE,
           linkRoleId: config.ZOHO_LINK_ROLE_ID,
+          largeUploadEnabled: config.ZOHO_LARGE_UPLOAD_ENABLED,
         }));
 
   const driveShare: DriveSharePort =
@@ -175,12 +177,17 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
     sendingDomain: config.MAILGUN_SENDING_DOMAIN ?? '',
     outboundFrom: config.OUTBOUND_FROM ?? '',
   };
-  // F-1: `MAILGUN_AUTHSERV_ID` has no fixed schema default — falling back to
-  // `INBOUND_DOMAIN` here (not in config.ts) keeps that fallback visible as a deliberate,
-  // documented guess rather than a silent schema default; `mapping.ts`'s doc comment and
-  // docs/runbooks/live-spikes.md spike #3 explain why it's still `@unverified-live`.
+  // Fix pass 5, F-B (`docs/reviews/critic-report.md`): `MAILGUN_AUTHSERV_ID` used to fall
+  // back to `INBOUND_DOMAIN` when unset — a value printed in every mailto link this
+  // product hands out, i.e. public and guessable, which is exactly what let a forged
+  // `Authentication-Results` header pass the authserv-id check. `loadConfig` now REQUIRES
+  // `MAILGUN_AUTHSERV_ID` whenever it would actually matter (real adapters, or
+  // `INBOUND_REQUESTS_ENABLED` in production) — the only fallback left here is the
+  // mapping module's own hardcoded, non-domain-specific default (`mailgun.org`), used
+  // only in configurations `loadConfig` didn't require it for (dev/test with fake
+  // adapters and the inbound path off).
   const mailgunMappingConfig = {
-    authservId: config.MAILGUN_AUTHSERV_ID ?? config.INBOUND_DOMAIN,
+    authservId: config.MAILGUN_AUTHSERV_ID ?? DEFAULT_MAILGUN_MAPPING_CONFIG.authservId,
     authSource: config.INBOUND_AUTH_SOURCE,
   };
   const inboundMail: InboundMailPort =

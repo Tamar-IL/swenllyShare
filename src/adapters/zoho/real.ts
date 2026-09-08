@@ -47,6 +47,16 @@ export interface ZohoFileStoreConfig {
    * ledger note, not just the code comment (`docs/runbooks/live-spikes.md` spike #1).
    */
   linkRoleId: string;
+  /**
+   * Fix pass 5, F-G (`docs/reviews/critic-report.md`): `uploadLargeFile` (below) is a
+   * MODELED guess with no field-level confirmation found anywhere reachable — routing a
+   * real customer's large file into it silently would be attempting an unverified API
+   * call against production data. `false` (the default) makes `upload()` refuse a file
+   * over `simpleUploadMaxBytes` with a clear `PermanentError` instead of attempting it;
+   * set `true` only once a founder has explicitly accepted that risk, or after spike 1
+   * (`docs/runbooks/live-spikes.md`) confirms the shape against a live account.
+   */
+  largeUploadEnabled?: boolean;
   /** Test seams only — `container.ts` never sets these. Let
    * `tests/contract/zoho-workdrive-wire.test.ts` exercise the large-file chunked-upload
    * path without allocating a real 250MB+ buffer, by shrinking both thresholds. Production
@@ -178,21 +188,27 @@ async function* chunkStream(stream: Readable, chunkSize: number): AsyncGenerator
 /**
  * Extracts an embed token for `workdrive.zohoexternal.com/embed/<token>`
  * (`research/08 §1a`) from a create-link response, if one is present under a plausible
- * field name — else derives a best-effort fallback from the plain link's own trailing
- * path segment. The fallback is explicitly **not** a verified embed token: nothing found
- * in search-snippet research confirmed WorkDrive's `POST /links` response ever contains a
- * distinct embed identifier at all. Whichever path is taken, the branded page (behind
- * `BRANDED_PAGE_ENABLED`, off by default) must not be trusted until a live response is
- * inspected — `docs/runbooks/live-spikes.md` spike #4.
+ * field name — else `null`.
+ *
+ * Fix pass 5, F-E (`docs/reviews/critic-report.md`): this used to fall back to deriving a
+ * token from the plain link's OWN trailing path segment when no `embed_url`/`embed_link`
+ * field was present. That fallback was never a verified embed token — nothing in
+ * search-snippet research confirmed WorkDrive's `POST /links` response ever contains a
+ * distinct embed identifier at all (`docs/runbooks/live-spikes.md` spike #1) — and worse,
+ * it is provably the WRONG thing to return: the plain link's path segment IS (or is
+ * derived from) the raw Zoho public link's own identifying token, so a branded page built
+ * from it would embed the exact value AC-U3 exists to keep out of the response entirely.
+ * Returning `null` here and refusing to render an iframe for it (`GET /s/:slug`,
+ * `src/http/routes/public-share.ts`) is strictly safer than a guess that fails silently
+ * open.
  */
-function extractOrDeriveEmbedToken(attrs: Record<string, unknown>, plainUrl: string): string {
+function extractEmbedToken(attrs: Record<string, unknown>): string | null {
   const embedCandidate = attrs.embed_url ?? attrs.embed_link;
   if (typeof embedCandidate === 'string') {
     const match = embedCandidate.match(/\/embed\/([^/?#]+)/);
     if (match?.[1]) return match[1];
   }
-  const segments = new URL(plainUrl).pathname.split('/').filter(Boolean);
-  return segments[segments.length - 1] ?? plainUrl;
+  return null;
 }
 
 /**
@@ -210,7 +226,9 @@ function extractOrDeriveEmbedToken(attrs: Record<string, unknown>, plainUrl: str
  *  - The large-file (`>250MB`) upload session shape is a **modeled guess** with no
  *    field-level confirmation found anywhere reachable this session — flagged loudly at
  *    its definition below.
- *  - The embed-token derivation is flagged separately (see `extractOrDeriveEmbedToken`).
+ *  - The embed-token extraction is flagged separately (see `extractEmbedToken`) — fix
+ *    pass 5, F-E: returns `null`, never a value derived from the raw link, when no
+ *    distinct embed identifier is present in the response.
  */
 export class ZohoFileStore implements FileStorePort {
   private tokenCache?: { accessToken: string; expiresAtMs: number };
@@ -382,6 +400,19 @@ export class ZohoFileStore implements FileStorePort {
     if (sizeBytes <= threshold) {
       return this.uploadSimple(parentId, stream, name);
     }
+    // Fix pass 5, F-G: refuse the unverified large-file path unless explicitly enabled —
+    // see `ZohoFileStoreConfig.largeUploadEnabled`'s doc comment. A clear, immediate
+    // `PermanentError` (dead-letters `file.publish` with a sender-visible "upload failed"
+    // rather than burning the job's retry budget against an endpoint shape nobody has
+    // confirmed) is strictly better than silently attempting it against production data.
+    if (!this.config.largeUploadEnabled) {
+      throw new PermanentError(
+        `Zoho large-file upload path (>${threshold} bytes) is disabled ` +
+          '(ZOHO_LARGE_UPLOAD_ENABLED=false) — its request/response shape is an unverified ' +
+          "guess (see uploadLargeFile's doc comment); confirm it against a live account " +
+          '(docs/runbooks/live-spikes.md spike #1) before enabling it.',
+      );
+    }
     return this.uploadLargeFile(parentId, stream, sizeBytes, name);
   }
 
@@ -396,7 +427,7 @@ export class ZohoFileStore implements FileStorePort {
   async createPublicLink(
     resourceId: string,
     opts: { allowDownload: boolean },
-  ): Promise<{ linkId: string; url: string; embedToken: string }> {
+  ): Promise<{ linkId: string; url: string; embedToken: string | null }> {
     const url = `${this.config.apiBase}/links`;
     const body = JSON.stringify({
       data: {
@@ -420,7 +451,7 @@ export class ZohoFileStore implements FileStorePort {
     if (!linkId || !linkUrl) {
       throw new PermanentError('Zoho create-link response missing an id or url');
     }
-    const embedToken = extractOrDeriveEmbedToken(attrs, linkUrl);
+    const embedToken = extractEmbedToken(attrs);
     return { linkId, url: linkUrl, embedToken };
   }
 
@@ -459,7 +490,7 @@ export class ZohoFileStore implements FileStorePort {
 
 export const __testables = {
   classifyZohoError,
-  extractOrDeriveEmbedToken,
+  extractEmbedToken,
   buildMultipartBody,
   sanitizeMultipartValue,
   chunkStream,

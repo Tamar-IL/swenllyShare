@@ -71,12 +71,23 @@ particular file; the DB setup file just warns and continues without it if unset.
 **What counts as pass:** the `FileStorePort contract: real` describe block runs (not
 skipped — check the console for the "LIVE_ZOHO is not set" warning **not** appearing) and its
 one test passes: upload → create-link → download round-trips the same bytes → revoke → delete,
-with no thrown error. Watch the terminal for the actual `url`/`embedToken` your account
-returns — paste them into your spike notes, since `extractOrDeriveEmbedToken`'s fallback path
-(deriving a token from the plain link's last path segment) needs the log-in checked: did the
-`POST /links` response actually contain an `embed_url` field, or did the adapter fall back to
-the derived guess? That answer is one of the most important facts this spike can produce
-(`research/08 §1a`).
+with no thrown error.
+
+**Headline output — the single fact this spike exists to answer (fix pass 5, F-E,
+`docs/reviews/critic-report.md`): does the `POST /links` response carry an embed
+token/URL at all?** Watch the terminal for the actual `url`/`embedToken` your account
+returns and write the answer down explicitly, before anything else from this spike:
+- **Yes** (an `embed_url`/`embed_link` field was present): record the exact field name and
+  a sample value in your spike notes (`research/08 §1a`) — `extractEmbedToken`
+  (`src/adapters/zoho/real.ts`) already parses it; confirm the parsed token matches.
+- **No** (`embedToken` came back `null`): this is not a failure to fix — `createPublicLink`
+  is DESIGNED to return `null` in this case (fix pass 5, F-E deleted the old fallback that
+  derived a token from the plain link's own trailing path segment, which leaked the raw
+  link's identifying value into the branded page). Confirm instead that `GET /s/:slug`
+  rendered the no-iframe fallback (filename + download button + "preview unavailable")
+  correctly for this file, and record that `BRANDED_PAGE_ENABLED` should stay off in
+  production until Zoho's API is confirmed to return a real embed field, or the branded
+  page's value proposition (an in-page preview) will never actually work.
 
 **If it also has a file over 250MB:** temporarily point `MAX_UPLOAD_BYTES`/a manual script at
 `ZohoFileStore.upload` with a >250MB stream to exercise `uploadLargeFile`. Expect this to
@@ -93,10 +104,12 @@ around.
 3. Update the `role_id` comment in `src/adapters/zoho/real.ts` if the observed mapping
    differs from `5=edit/6=view/7=upload`, and update `ZOHO_LINK_ROLE_ID`'s default in
    `.env.example` if `"6"` wasn't actually the view-only value.
-4. If the response carried a genuine `embed_url` (or any other confirmed embed-token field),
-   delete the "derive from the plain link" fallback comment's uncertainty language — it's no
-   longer a guess for this API version, but wire the confirmed field name in
-   `extractOrDeriveEmbedToken` first.
+4. If the response carried a genuine `embed_url` (or any other confirmed embed-token field)
+   under a DIFFERENT name than `embed_url`/`embed_link`, wire the confirmed field name into
+   `extractEmbedToken` (`src/adapters/zoho/real.ts`) and update its doc comment — but do NOT
+   reintroduce a raw-link-derived fallback for the case it's absent; `null` (and the
+   branded page's no-iframe rendering) is the correct, permanent behavior for that case,
+   not a placeholder.
 
 ---
 

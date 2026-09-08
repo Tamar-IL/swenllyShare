@@ -1,7 +1,7 @@
 import type { InboundMailPort, InboundMessage } from '../../ports/inbound-mail.js';
 import type { OutboundAttachment, OutboundMailPort } from '../../ports/outbound-mail.js';
 import type { Clock } from '../../ports/clock.js';
-import { PermanentError, TransientError } from '../../ports/errors.js';
+import { AmbiguousSendError, PermanentError, TransientError } from '../../ports/errors.js';
 import type { PortError } from '../../ports/errors.js';
 import {
   DEFAULT_MAILGUN_MAPPING_CONFIG,
@@ -65,6 +65,40 @@ function classifyMailgunError(status: number, body: unknown): PortError {
 }
 
 /**
+ * Fix pass 5, F-A: classifies a `fetch` rejection — i.e. no HTTP exchange ever
+ * completed — into "definitely never reached Mailgun" (safe to treat as a non-send and
+ * retry) vs. "genuinely unknown whether Mailgun got it" (`AmbiguousSendError`). Node's
+ * `fetch`/undici surfaces the low-level cause as `err.cause` (a `TypeError` wrapping a
+ * `SystemError`-shaped object with a `.code`); a connection that was never established at
+ * all (refused, DNS failure, unreachable network) could not possibly have delivered any
+ * bytes to Mailgun, so it's as safe to retry as an explicit non-2xx response. Anything
+ * else — a timeout or reset that could have occurred AFTER the request body was written,
+ * an aborted request, an error shape we don't recognize — cannot be proven to have failed
+ * before Mailgun received it, so it's ambiguous rather than a guess in either direction.
+ */
+function classifyMailgunSendException(err: unknown): PortError {
+  const cause = err instanceof Error ? (err.cause as { code?: unknown } | undefined) : undefined;
+  const code = typeof cause?.code === 'string' ? cause.code : undefined;
+  const NEVER_CONNECTED_CODES = new Set([
+    'ECONNREFUSED',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ENETUNREACH',
+    'EHOSTUNREACH',
+    'ENETDOWN',
+  ]);
+  if (code && NEVER_CONNECTED_CODES.has(code)) {
+    return new TransientError('network error calling Mailgun messages API (never connected)', {
+      cause: err,
+    });
+  }
+  return new AmbiguousSendError(
+    'Mailgun messages API call failed with no confirmed response — the message may or may not have been received',
+    { cause: err },
+  );
+}
+
+/**
  * Real Mailgun outbound adapter — one multipart POST to the messages API via Node's
  * built-in `fetch`/`FormData`/`Blob` (architecture.md §1: no Mailgun SDK; `undici`'s
  * `MockAgent` intercepts the global `fetch` dispatcher the same way it intercepts
@@ -80,6 +114,7 @@ export class MailgunOutboundAdapter implements OutboundMailPort {
     subject: string;
     text: string;
     attachment?: OutboundAttachment;
+    deliveryId?: string;
   }): Promise<{ providerMessageId: string }> {
     const form = new FormData();
     form.set('from', this.config.outboundFrom);
@@ -90,6 +125,17 @@ export class MailgunOutboundAdapter implements OutboundMailPort {
     // method): the reply composer's body/subject/from already carry everything the
     // requester needs, and there is no support mailbox to route a reply to yet — setting
     // one would silently invite replies nobody reads.
+    // Fix pass 5, F-A: a deterministic custom variable + Message-Id derived from the
+    // delivery id, so a rare double-send (a retried `AmbiguousSendError`, two workers
+    // racing a lost advisory lock) is traceable to one delivery row in Mailgun's own logs
+    // instead of showing up as two unrelated messages.
+    if (message.deliveryId) {
+      form.set('v:swenlly-delivery', message.deliveryId);
+      form.set(
+        'h:Message-Id',
+        `<swenlly-delivery-${message.deliveryId}@${this.config.sendingDomain}>`,
+      );
+    }
     if (message.attachment) {
       const blob = new Blob([new Uint8Array(message.attachment.content)], {
         type: message.attachment.contentType,
@@ -107,7 +153,7 @@ export class MailgunOutboundAdapter implements OutboundMailPort {
         body: form,
       });
     } catch (err) {
-      throw new TransientError('network error calling Mailgun messages API', { cause: err });
+      throw classifyMailgunSendException(err);
     }
 
     const text = await res.text().catch(() => '');

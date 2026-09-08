@@ -58,6 +58,10 @@ export const STATUS_META: Record<DisplayStatus, { label: string; pillClass: stri
 export const OUTCOME_META: Record<DeliveryOutcome, { label: string; pillClass: string }> = {
   queued: { label: 'בתהליך', pillClass: 'pill-publishing' },
   sent: { label: 'נשלח', pillClass: 'pill-delivered' },
+  // Fix pass 5, F-A: the honest "we don't actually know" outcome — never silently shown
+  // as delivered. Reuses the danger/quarantine treatment (visual-spec §4.4): this is the
+  // one non-attack outcome that still needs the sender's attention, not a routine gray.
+  unconfirmed: { label: 'לא מאומת', pillClass: 'pill-quarantined' },
   failed: { label: 'נכשל', pillClass: 'pill-failed' },
   quarantined: { label: 'נחסם', pillClass: 'pill-quarantined' },
   rate_limited: { label: 'הגבלת קצב', pillClass: 'pill-expired' },

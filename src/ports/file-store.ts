@@ -15,11 +15,19 @@ export interface FileStorePort {
     name: string,
   ): Promise<{ resourceId: string }>;
 
-  /** Creates (or returns the existing) public link for `resourceId`. */
+  /**
+   * Creates (or returns the existing) public link for `resourceId`. `embedToken` is
+   * `null` when the provider's response carried no distinct embed identifier (fix pass 5,
+   * F-E, `docs/reviews/critic-report.md`) — callers must NEVER derive one from `url`'s own
+   * path (that would put the raw link's identifying token back into whatever renders the
+   * embed, defeating the entire point of the branded page). A `null` embedToken means
+   * render the branded page without an iframe, not fall back to any raw-link-derived
+   * value.
+   */
   createPublicLink(
     resourceId: string,
     opts: { allowDownload: boolean },
-  ): Promise<{ linkId: string; url: string; embedToken: string }>;
+  ): Promise<{ linkId: string; url: string; embedToken: string | null }>;
 
   /** Revokes a previously created public link — part of `file.expire` (architecture.md §7). */
   revokeLink(linkId: string): Promise<void>;

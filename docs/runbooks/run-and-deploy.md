@@ -59,8 +59,25 @@ CI (`.github/workflows/ci.yml`) runs typecheck → lint → prettier check → u
    under a rolling deploy with old and new versions briefly overlapping.)
 4. **DNS for `INBOUND_DOMAIN`:** MX → Mailgun's receiving MX hosts; SPF (`v=spf1
    include:mailgun.org ~all`), DKIM (Mailgun-issued selector `TXT` record), and DMARC
-   (`v=DMARC1; p=quarantine`, or stricter) all published — the inbound pipeline's DMARC gate
-   (architecture §10) rejects everything if these aren't in place.
+   (`v=DMARC1; p=quarantine`, or stricter) all published. **Fix pass 5 correction (F-H,
+   `docs/reviews/critic-report.md`): this governs OUTBOUND deliverability from
+   `INBOUND_DOMAIN` (whether Swenlly's own reply mail lands in an inbox instead of spam) —
+   it has NO effect on the inbound pipeline's DMARC gate, which evaluates the *requester's*
+   `From` domain, not ours.** A prior version of this checklist claimed otherwise; if
+   inbound requests are being silently quarantined, look at item 4a below, not here.
+4a. **The inbound DMARC gate itself — the actual thing that decides whether a request
+   gets through:** `INBOUND_REQUESTS_ENABLED` (kill switch, defaults `false`) and
+   `MAILGUN_AUTHSERV_ID` (the RFC 8601 authserv-id our own verdict is filed under) are BOTH
+   required before the inbound email-request path can work at all —
+   `loadConfig` refuses to boot production with `INBOUND_REQUESTS_ENABLED=true` and no
+   `MAILGUN_AUTHSERV_ID` set. **Never set `MAILGUN_AUTHSERV_ID` to (or leave it defaulting
+   toward) `INBOUND_DOMAIN`** — that value is printed in every mailto link this product
+   hands out, i.e. public and guessable, and was the exact hole F-B (`docs/reviews/critic-
+   report.md`) found forgeable. Do not flip `INBOUND_REQUESTS_ENABLED=true` in production
+   until spike 3 (`docs/runbooks/live-spikes.md`) has captured one real Mailgun inbound
+   payload and confirmed the DMARC/SPF/DKIM field-name guess in
+   `src/adapters/mailgun/mapping.ts` against it — flipping it on a guess reopens the exact
+   forgeable-gate risk the kill switch exists to hold shut.
 5. **Mailgun Route:** `match_recipient("^cust-.*@<INBOUND_DOMAIN>$")` → forward to
    `POST https://<PUBLIC_BASE_URL>/webhooks/mailgun/inbound`. The webhook verifies Mailgun's
    HMAC signature before parsing anything (architecture §10) — `MAILGUN_SIGNING_KEY` must

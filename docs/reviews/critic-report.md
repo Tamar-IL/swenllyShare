@@ -66,6 +66,23 @@ pass a deterministic idempotency key (`delivery:<deliveryId>`) to Mailgun so a r
 the ambiguous case stops needing a guess at all. Add a test that fails the send itself, not the
 blob read.
 
+> **Fix pass 5 status: FIXED.** `src/ports/errors.ts` adds `AmbiguousSendError`.
+> `src/adapters/mailgun/real.ts` classifies every failure: a completed non-2xx exchange is a
+> definite non-send (unchanged); a `fetch` rejection is `TransientError` only for
+> never-connected codes (ECONNREFUSED/ENOTFOUND/EAI_AGAIN/…), `AmbiguousSendError` otherwise
+> (no response, or an unrecognized shape). `outboundMail.send` now carries a `deliveryId`,
+> stamped as a deterministic `v:swenlly-delivery` custom variable + `Message-Id`.
+> `src/jobs/handlers/delivery-fulfill.ts`: a definite non-send reverts `dispatching -> sending`
+> and rethrows (job-level retry/backoff/dead-letter applies); only an `AmbiguousSendError` or a
+> bare process crash (no error ever classified) finalizes — as the new outcome `unconfirmed`
+> (migration `0004`), rendered "לא מאומת", never `sent`. The Drive-share path now has an
+> independent `granted` CAS step (`markGranted`) between the permission grant and the reply
+> email, so a reply failure after a successful grant retries only the reply, never re-shares.
+> Tests: `tests/review/delivery-fulfill-classification.test.ts` (all four scenarios named in
+> this finding), `tests/redteam/delivery-toctou.test.ts` RT-13 (rewritten — the ambiguous
+> case now asserts `unconfirmed`, not `sent`), `tests/contract/mailgun-wire.test.ts` (network
+> classification + idempotency fields).
+
 ---
 
 ### F-B · The DMARC gate is still forgeable — F-1 is closed for one payload shape out of four
@@ -137,6 +154,26 @@ behaviour. There is no test anywhere for `extractFromTopLevelAuthResultsField`, 
 branch in the file. The suite proves the guard fires when it can fire; it never asks what happens
 when it cannot.
 
+> **Fix pass 5 status: FIXED, all four "Do this" items.** (1) `INBOUND_REQUESTS_ENABLED`
+> defaults `false`; `.env.example` gets all six missing vars plus a drift-detection unit test
+> (`tests/unit/env-example-sync.test.ts`) so a future addition that forgets the file fails CI.
+> (2) `message-headers` absent ⇒ `extractAuthResult` returns `unknown`/`null` for everything,
+> full stop, before either source runs. (3)/finding 1: the top-level `Authentication-Results`
+> fallback is deleted entirely (not merely authserv-id-gated) — it was never reachable safely
+> once (2) fails closed on its one legitimate use case. (4)/finding 3: priority flipped —
+> Mailgun's synthetic fields (source b) tried first, `Authentication-Results` (source a)
+> second. `MAILGUN_AUTHSERV_ID` is now required config (`loadConfig` cross-field check)
+> whenever `ADAPTERS=real` or `INBOUND_REQUESTS_ENABLED=true` in production, and
+> `container.ts` no longer falls back to `INBOUND_DOMAIN`. The pinned test at
+> `mailgun-mapping.test.ts:96` is corrected (asserts `unknown`, with an explanatory rename)
+> and a dedicated test now covers the exact `extractFromTopLevelAuthResultsField` gap this
+> finding names — moot, since that function no longer exists. All four probe payloads A-D are
+> added as tests at both the mapper (`tests/unit/mailgun-mapping.test.ts`) and pipeline level
+> (`tests/review/dmarc-gate-payloads-a-d.test.ts`): A/B/C quarantine `dmarc_unknown`, D still
+> resolves `fail` (the defense that already held keeps holding). `run-and-deploy.md`'s
+> production checklist gets the kill switch + `MAILGUN_AUTHSERV_ID` + spike-3 gate, and item 4
+> (F-H) is corrected in place.
+
 ---
 
 ### F-C · Expiry can fail permanently and silently on the shipping default path
@@ -179,6 +216,23 @@ that records the failure and surfaces it — a `/readyz` counter of stranded exp
 the file page; (c) never silently leave a file `ready` past `expires_at`. Add a regression test
 that fails `revokeLink` permanently and asserts the system notices.
 
+> **Fix pass 5 status: FIXED, all three items.** (a) `jobs.ensureScheduled` reactivates
+> `done`/`dead`/`failed` rows (was `done` only), and both `expiry.safety_sweep` and
+> `scheduleExpire` now call it. `listExpiredWithoutScheduledJob` also gained a second clause
+> (`status = 'expired' AND expiry_error IS NOT NULL`) — without it a file already flipped to
+> `expired` (see next point) would never be rediscovered by the sweep at all. (b) A `file.expire`
+> branch was added to `runDeadLetterHook` (`src/jobs/queue.ts`), writing a new
+> `files.expiry_error` column (migration `0005`); surfaced as `/readyz`'s `strandedExpiries`
+> count and a warning badge on the file-detail page. (c) `handleFileExpire` now flips `status`
+> to `expired` and enqueues every `drive.revoke` job FIRST, unconditionally — both idempotent,
+> both independent of the `revokeLink` call that follows and may still fail/retry/dead-letter.
+> Test: `tests/review/expiry-cannot-strand.test.ts`, the exact scenario in this finding's
+> re-check protocol line — asserts `expired`, `drive.revoke` enqueued, `strandedExpiries === 1`,
+> the expire job reactivated to `pending` (not `dead`), and the marker clearing once the
+> underlying failure is fixed. One caught-in-the-act regression from this fix pass itself is in
+> `docs/lessons.md` (2026-09-08, jobs repository) — a real-vs-injected-clock race the first
+> version of this fix introduced and a few repeated test runs caught.
+
 ---
 
 ## Serious
@@ -219,6 +273,12 @@ we dropped it on a redundancy argument that the red team has since undermined. R
 accept the risk on the record?"* Then either restore it or record the acceptance. Do not leave it
 resolved-by-omission.
 
+> **Fix pass 5 status: NOT IN SCOPE.** The orchestrator carried this forward explicitly as a
+> founder fork rather than assigning it to this fix pass — no code or governance change was
+> made here. It remains an open decision: restore the confirm-link for non-allowlisted
+> requesters, or record the founder's acceptance of the risk on the record. Everything else in
+> this fix pass (F-B in particular) narrows, not widens, the gap this finding is about.
+
 ### F-E · AC-U3's proof depends on a property of the fake that the real adapter contradicts
 `src/adapters/zoho/fake.ts:60-66` · `src/adapters/zoho/real.ts` (`extractOrDeriveEmbedToken`,
 `:89-97`) · `src/http/routes/public-share.ts:31`
@@ -241,6 +301,20 @@ real code's own fallback contradicts it.
 have `createPublicLink` return `embedToken: null` on the derive path and have `/s/:slug` refuse to
 render rather than embed a derived token. Add a test that asserts the branded page contains no
 substring of `zoho_public_link` (not just the whole string).
+
+> **Fix pass 5 status: FIXED.** `extractOrDeriveEmbedToken` (renamed `extractEmbedToken`) no
+> longer has a derive path at all — it returns `null` when no `embed_url`/`embed_link` field is
+> present, never a value read from `plainUrl`. `FileStorePort.createPublicLink`'s type is now
+> `embedToken: string | null`. `GET /s/:slug` (`src/http/routes/public-share.ts`) renders the
+> branded page WITHOUT an iframe when `zoho_embed_token` is null — filename, download button,
+> and a "preview unavailable" line (`share-page.eta`) — never a fallback to the raw link. Test:
+> `tests/redteam/public-share-surface.test.ts`'s new case forces a null embed token through the
+> real publish flow (`FakeFileStore.forceNullEmbedTokenOnNextLink()`, a new test seam) and
+> asserts no substring of `zoho_public_link`'s own path, at least 12 characters long, appears
+> anywhere in the response body or headers — stronger than the whole-string check the sibling
+> leak test already had. `docs/runbooks/live-spikes.md` spike 1 now makes "does the create-link
+> response carry an embed token/URL" its headline output, with the `null` case documented as
+> expected/correct behavior, not something to fix.
 
 ### F-F · Three founder-facing documents state F-1 is closed; it is not
 `README.md:110-112` · `docs/security/red-team-report.md §6 F-1` · `docs/decisions.md` ADR 11 ·
@@ -266,6 +340,12 @@ from a provider-stamped `Authentication-Results` entry whose authserv-id matches
 Mailgun's `message-headers` array is absent the verdict is `unknown` and the request is
 quarantined."* Then make that sentence true (F-B fix 2).
 
+> **Fix pass 5 status: FIXED.** All four rewritten to state the property and its precondition,
+> essentially the critic's own suggested sentence: README's security-model bullet, ADR 11's
+> consequence line (with an appended correction, not an edit of the original), progress.md's
+> B2+C entry line, and red-team-report.md §6 F-1's fix-status paragraph. And per the "then make
+> that sentence true" instruction: F-B's fix makes it true.
+
 ### F-G · `MAX_UPLOAD_BYTES` defaults to 1 GB while everything above 250 MB is invented code
 `src/config.ts:73` · `src/adapters/zoho/real.ts` (`uploadLargeFile`, "modeled, not confirmed")
 
@@ -278,6 +358,17 @@ succeed, then watches `file.publish` fail eight times and land on "ההעלאה 
 raise it only after spike 1 confirms the large-file shape. The UI already renders the cap from
 config, so the sender is told the truth before they pick a file.
 
+> **Fix pass 5 status: FIXED, and hardened further.** `MAX_UPLOAD_BYTES` now defaults to
+> 262,144,000 (250 MB). Beyond the critic's own recommendation: the real Zoho adapter's
+> `upload()` now REFUSES (`PermanentError`, no request attempted) any file that would need the
+> unverified large-file path unless a new `ZOHO_LARGE_UPLOAD_ENABLED` flag (default `false`) is
+> explicitly set — so even a stale/misconfigured `MAX_UPLOAD_BYTES` above 250 MB can no longer
+> silently route a real customer file into invented code. `.env.example`, README, and
+> `architecture.md §6/§9` updated with the new default and a one-line note that it rises after
+> spike 1. Test: `tests/contract/zoho-workdrive-wire.test.ts`'s new refusal case (no request
+> sent, `PermanentError` thrown) plus the existing large-file wire-shape test now opts in
+> explicitly.
+
 ### F-H · `run-and-deploy.md` item 4 is factually wrong about the DMARC gate
 `docs/runbooks/run-and-deploy.md:60-65`
 
@@ -287,12 +378,29 @@ domain. `INBOUND_DOMAIN`'s own records govern *outbound* deliverability and are 
 reason — but publishing them has no effect whatsoever on whether inbound requests pass gate 5. A
 founder debugging "no requests are getting through" will re-check DNS instead of finding F-B.
 
+> **Fix pass 5 status: FIXED.** Item 4 now states plainly what it governs (outbound
+> deliverability, not the inbound gate) and points at the real gate; a new item 4a covers the
+> kill switch + `MAILGUN_AUTHSERV_ID` + spike-3 gate that actually decides whether inbound
+> requests pass.
+
 ---
 
 ## Minor
 
+> **Fix pass 5 status for this section:** the orchestrator scoped this fix pass to F-A, F-B,
+> F-C, F-E, F-G, and the F-F/doc-sync items below — the Minor items here were not individually
+> assigned. Two were fixed anyway as directly in the path of other work: the `.env.example`
+> gap (below) is F-B's fix item 1, and the `fromDomain` `split('@')[1]` bug (below) was fixed
+> alongside `request-pipeline.ts`'s other changes since it was trivial and exactly the shape of
+> a regression the F-3 fix already existed to prevent. The remaining Minor items (the quarantine
+> cap's silent suppression, `requester_address` on an unparseable `From`, the three
+> `console.log` call sites, attachment memory buffering, and the per-file expiry-mode UI
+> default) are **not addressed** in this pass — flagged here for a future pass, not silently
+> dropped.
+
 - **`.env.example` is missing six live config vars** (F-B). It is the file the runbook tells the
   operator to copy. Anything not in it does not exist operationally.
+  > **Fix pass 5 status: FIXED** — see F-B's status note above.
 - **`architecture.md §9`'s env list has drifted** from `config.ts` — `PG_SSL`, `RATE_DOMAIN_PER_HOUR`,
   `QUARANTINE_PER_TOKEN_PER_HOUR`, `WEBHOOK_BODY_LIMIT_BYTES`, `INBOUND_*`, `ZOHO_ACCOUNTS_BASE`,
   `ZOHO_LINK_ROLE_ID`, `GOOGLE_OAUTH_*` all arrived in fix passes; only README caught up.
@@ -309,6 +417,7 @@ founder debugging "no requests are getting through" will re-check DNS instead of
   `inbound_messages.from_domain` while every gate correctly uses `addressDomain()` (last `@`).
   Not security-relevant on this path — it is a display/audit column — but it is the exact shape
   of the F-3 bug and will read as a regression to the next reviewer. Use the same helper.
+  > **Fix pass 5 status: FIXED** — `request-pipeline.ts` now calls `addressDomain()`.
 - **`console.log` in `src/domain/files.ts:238`, `src/jobs/handlers/file-expire.ts:32`,
   `src/jobs/queue.ts:81`** routes around pino and its redaction list, which
   `run-and-deploy.md` item 8 explicitly warns against.

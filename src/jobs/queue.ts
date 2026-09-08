@@ -96,6 +96,26 @@ async function runDeadLetterHook(container: Container, job: JobRow): Promise<voi
         reason: job.last_error ?? 'job_dead_lettered',
       });
     }
+    return;
+  }
+  if (job.kind === 'file.expire') {
+    // Fix pass 5, F-C (docs/reviews/critic-report.md): before this hook existed, a
+    // dead-lettered `file.expire` job (e.g. a permanently failing `revokeLink` against
+    // an `@unverified-live` endpoint) vanished with no operator-visible trace — the file
+    // stayed `ready` past its own `expires_at`, its raw distribution link stayed live,
+    // and nothing anywhere said so. Record the stranding; `expiry.safety_sweep`
+    // (`jobs.ensureScheduled`) reactivates the job on the next sweep window regardless,
+    // so this is visibility, not the retry mechanism itself.
+    const tenantId = String(payload.tenantId ?? '');
+    const fileId = String(payload.fileId ?? '');
+    if (tenantId && fileId) {
+      await files.recordExpiryError(
+        container.pool,
+        tenantId,
+        fileId,
+        job.last_error ?? 'job_dead_lettered',
+      );
+    }
   }
 }
 

@@ -123,6 +123,9 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
           isExpired: displayStatus === 'expired' || displayStatus === 'deleted',
           isPublishing: displayStatus === 'publishing',
           isFailed: displayStatus === 'failed',
+          // Fix pass 5, F-C (docs/reviews/critic-report.md): the file's revoke could not
+          // be enforced and is still stuck — see src/domain/health.ts's doc comment.
+          hasExpiryError: Boolean(file.expiry_error),
           pillClass: STATUS_META[displayStatus].pillClass,
           statusLabel: STATUS_META[displayStatus].label,
           uploadedAtLabel: formatHebrewDate(file.created_at),

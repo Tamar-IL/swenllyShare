@@ -394,26 +394,31 @@ resolved (quarantine a domain-less `pass`, per orchestrator decision) and F-12's
 was fixed now that `security-headers.ts` was back in remit. See those two findings' entries below
 for what changed; every other finding's status below is unchanged from the original pass.
 
-### F-1 · CRITICAL · fixed
-`src/adapters/mailgun/mapping.ts` no longer probes guessed key names for DMARC/SPF/DKIM.
-`extractAuthResult` reads only (a) an `Authentication-Results` entry in Mailgun's documented
-`message-headers` JSON array — topmost entry whose `authserv-id` matches config
-`MAILGUN_AUTHSERV_ID` (defaults to `INBOUND_DOMAIN`, `container.ts`) — with a degraded top-level
-`Authentication-Results` field fallback when `message-headers` is absent, or (b) the classic
-guessed fields kept ONLY in their exact lowercase form (`dmarc`, `spf`, `dkim`, `dmarc-domain`,
-matching Mailgun's own naming convention for synthetic fields); the Title-Case/`X-Mailgun-*`
-variants that collided with MIME-header-shaped attacker input are gone entirely. Either source is
-discarded if the same field name also appears in `message-headers` (the attacker-controlled-MIME-
-header guard). New config `INBOUND_AUTH_SOURCE` (`authentication-results|mailgun-fields|both`,
-default `both`) selects the source(s); `INBOUND_REQUESTS_ENABLED` (default `true`) is the kill
-switch — `false` quarantines every signature-verified webhook with reason `inbound_disabled`
-before any auth-results extraction runs. `docs/runbooks/live-spikes.md` spike 3 now documents the
-`message-headers` capture step and the kill-switch-during-capture procedure.
-Tests: `RT-01`, `RT-01b`, `RT-05` (auth-gate-bypass.test.ts) + new unit coverage
-(`tests/unit/mailgun-mapping.test.ts`) for the `message-headers` path the pinned suite itself
-never exercises (its payloads never populate `message-headers`).
+### F-1 · CRITICAL · fixed, then re-opened and re-fixed (fix pass 5, F-B)
+`src/adapters/mailgun/mapping.ts` no longer probes guessed key names for DMARC/SPF/DKIM — this
+much has held since the pass below. But the critic gate (`docs/reviews/critic-report.md`, F-B)
+found the fix as originally written closed only one of four realistic forgery payload shapes: the
+top-level "degraded fallback" performed no `authserv-id` check at all, and the anti-forgery guard
+both sources depended on was inoperative whenever `message-headers` was simply absent — a
+contemplated, documented condition, not exotic. **The property that now holds, stated with its
+precondition (fix pass 5):** DMARC/SPF/DKIM are trusted ONLY when Mailgun's `message-headers`
+array is present in the payload — from Mailgun's own synthetic top-level fields (`dmarc`, `spf`,
+`dkim`, `dmarc-domain`, tried first) or a `message-headers` `Authentication-Results` entry whose
+`authserv-id` exactly matches the REQUIRED config `MAILGUN_AUTHSERV_ID` (never defaulted to
+`INBOUND_DOMAIN`, which is public and guessable — the exact value the critic's forged payloads
+exploited). When `message-headers` is absent, every auth field reads `unknown` and the request is
+quarantined, full stop — the old top-level-only `Authentication-Results` fallback was deleted
+entirely, not hardened, because it was never reachable safely. `INBOUND_AUTH_SOURCE`
+(`authentication-results|mailgun-fields|both`, default `both`) selects which recognized source(s)
+run; `INBOUND_REQUESTS_ENABLED` now defaults `false` (was `true`) — a kill switch built for an
+unverified assumption defaults to the safe position.
+Tests: `RT-01`, `RT-01b`, `RT-05` (auth-gate-bypass.test.ts) + `tests/unit/mailgun-mapping.test.ts`
+(both the original `message-headers`-path coverage and, since fix pass 5, a dedicated "critic four
+probe payloads A-D" suite at both the mapper and pipeline level —
+`tests/review/dmarc-gate-payloads-a-d.test.ts`).
 **Still `@unverified-live`** — this is a mapping-logic fix proven against synthetic payloads, not
-a live-payload confirmation. The field-name guess remains a guess until spike 3 is actually run.
+a live-payload confirmation. The field-name guess remains a guess until spike 3 is actually run;
+`INBOUND_REQUESTS_ENABLED=false` holds the path shut until it is.
 
 ### F-2 · HIGH · fully fixed (orchestrator decision, 2026-09-08 hardening pass)
 The root-cause bug (alignment silently skipped because `dmarcDomain` extraction failed to find

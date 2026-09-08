@@ -18,6 +18,8 @@ describe.skipIf(!hasTestDatabase())('migrate (idempotency)', () => {
       '0001_init.sql',
       '0002_delivery_sending_state.sql',
       '0003_delivery_dispatching_state.sql',
+      '0004_delivery_granted_unconfirmed_outcomes.sql',
+      '0005_file_expiry_error.sql',
     ]);
   });
 

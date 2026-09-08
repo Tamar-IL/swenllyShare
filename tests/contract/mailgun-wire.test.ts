@@ -6,7 +6,7 @@ import {
   type MailgunConfig,
 } from '../../src/adapters/mailgun/real.js';
 import { computeMailgunSignature } from '../../src/adapters/mailgun/fake.js';
-import { PermanentError, TransientError } from '../../src/ports/errors.js';
+import { AmbiguousSendError, PermanentError, TransientError } from '../../src/ports/errors.js';
 import type { Clock } from '../../src/ports/clock.js';
 import { pathnameIs, readMockBodyText } from './support/mock-http.js';
 
@@ -81,6 +81,10 @@ describe('MailgunInboundAdapter.parse (pure — delegates entirely to mapping.ts
       'Message-Id': '<msg-1@mailgun>',
       token: 'tok-1',
       dmarc: 'pass',
+      // Fix pass 5, F-B (docs/reviews/critic-report.md): the anti-forgery dedup guard
+      // requires `message-headers` to be present — a realistic Mailgun payload always
+      // carries SOME MIME headers.
+      'message-headers': JSON.stringify([['From', '"Some Sender" <sender@example.com>']]),
     };
 
     const parsed = adapter.parse(payload);
@@ -204,6 +208,62 @@ describe('MailgunOutboundAdapter.send — offline wire-shape tests', () => {
 
     await expect(adapter.send({ to: 'a@b.com', subject: 's', text: 't' })).rejects.toBeInstanceOf(
       PermanentError,
+    );
+  });
+
+  it('stamps a deterministic v:swenlly-delivery custom variable and Message-Id when deliveryId is given', async () => {
+    const pool = mockAgent.get('https://api.mailgun.test');
+    let capturedBody = '';
+    pool
+      .intercept({ path: pathnameIs('/v3/mail.swenlly.test/messages'), method: 'POST' })
+      .reply(async (opts) => {
+        capturedBody = await readMockBodyText(opts.body);
+        return { statusCode: 200, data: { id: '<msg-3@mailgun.test>' } };
+      });
+
+    const adapter = new MailgunOutboundAdapter(CONFIG);
+    await adapter.send({
+      to: 'a@b.com',
+      subject: 's',
+      text: 't',
+      deliveryId: 'delivery-abc-123',
+    });
+
+    expect(capturedBody).toContain('name="v:swenlly-delivery"');
+    expect(capturedBody).toContain('delivery-abc-123');
+    expect(capturedBody).toContain('name="h:Message-Id"');
+    expect(capturedBody).toContain('swenlly-delivery-delivery-abc-123@mail.swenlly.test');
+  });
+
+  it('classifies a fetch failure with no completed exchange: never-connected codes are Transient, everything else is Ambiguous', async () => {
+    // Node's fetch (undici) wraps a low-level connection failure as
+    // `TypeError('fetch failed', { cause })`, where `cause` is the underlying system-error-
+    // shaped object carrying `.code` directly (`err.cause.code`) — reproduced here the same
+    // way undici itself constructs it (confirmed against a real ECONNREFUSED via MockAgent
+    // during development), not a made-up shape.
+    const pool = mockAgent.get('https://api.mailgun.test');
+    pool
+      .intercept({ path: pathnameIs('/v3/mail.swenlly.test/messages'), method: 'POST' })
+      .replyWithError(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }));
+    const adapter = new MailgunOutboundAdapter(CONFIG);
+    await expect(adapter.send({ to: 'a@b.com', subject: 's', text: 't' })).rejects.toBeInstanceOf(
+      TransientError,
+    );
+
+    // A connection that WAS established (or a timeout/reset that could have occurred after
+    // the request body was already written) cannot be proven to be a non-send.
+    pool
+      .intercept({ path: pathnameIs('/v3/mail.swenlly.test/messages'), method: 'POST' })
+      .replyWithError(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }));
+    await expect(adapter.send({ to: 'a@b.com', subject: 's', text: 't' })).rejects.toBeInstanceOf(
+      AmbiguousSendError,
+    );
+
+    pool
+      .intercept({ path: pathnameIs('/v3/mail.swenlly.test/messages'), method: 'POST' })
+      .replyWithError(new Error('some other undocumented failure shape'));
+    await expect(adapter.send({ to: 'a@b.com', subject: 's', text: 't' })).rejects.toBeInstanceOf(
+      AmbiguousSendError,
     );
   });
 });

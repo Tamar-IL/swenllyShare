@@ -1,5 +1,6 @@
 import type { Pool } from '../db/pool.js';
 import { jobs } from '../db/repositories/jobs.js';
+import { files } from '../db/repositories/files.js';
 
 /**
  * Read-side ops primitives for `GET /readyz` (architecture.md §2 boundary rule 1: HTTP
@@ -20,5 +21,13 @@ export class HealthService {
    * sweep actually been scheduled recently" freshness check. */
   async mostRecentScheduledAt(kind: string): Promise<Date | null> {
     return jobs.mostRecentScheduledAt(this.pool, kind);
+  }
+
+  /** Fix pass 5, F-C (docs/reviews/critic-report.md): `/readyz`'s count of files whose
+   * `file.expire` job has dead-lettered at least once and never since recovered — see
+   * `files.recordExpiryError`/`clearExpiryError`. Zero doesn't mean nothing ever failed,
+   * only that nothing is CURRENTLY stuck. */
+  async countStrandedExpiries(): Promise<number> {
+    return files.countStrandedExpiries(this.pool);
   }
 }

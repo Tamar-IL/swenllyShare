@@ -37,7 +37,7 @@ function intFromEnv(defaultValue: number, opts?: { min?: number }) {
   );
 }
 
-export const configSchema = z.object({
+const baseConfigSchema = z.object({
   // --- Core ---
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: intFromEnv(3000, { min: 1 }),
@@ -70,7 +70,20 @@ export const configSchema = z.object({
 
   // --- Upload / attachment limits ---
   ATTACH_LIMIT_BYTES: intFromEnv(20_971_520, { min: 1 }),
-  MAX_UPLOAD_BYTES: intFromEnv(1_073_741_824, { min: 1 }),
+  // Fix pass 5, F-G (docs/reviews/critic-report.md): defaults to the CORROBORATED simple-
+  // upload ceiling (250MB, `SIMPLE_UPLOAD_MAX_BYTES` in src/adapters/zoho/real.ts — a
+  // public reference implementation and community threads, not a primary Zoho doc page,
+  // but at least corroborated). The `>250MB` chunked large-file path is a MODELED guess
+  // with no field-level confirmation found anywhere (that method's own doc comment says
+  // so) — routing real customer files into it by default, up to the old 1GB ceiling, sent
+  // every upload above 250MB into invented code. Raise only after spike 1
+  // (docs/runbooks/live-spikes.md) confirms the large-file shape, or set
+  // ZOHO_LARGE_UPLOAD_ENABLED=true once a founder has explicitly accepted that risk.
+  MAX_UPLOAD_BYTES: intFromEnv(262_144_000, { min: 1 }),
+  // Fix pass 5, F-G: the real Zoho adapter refuses (PermanentError, not a silent attempt)
+  // to route a file into the unverified large-file chunked-upload path unless this is
+  // explicitly set — see src/adapters/zoho/real.ts.
+  ZOHO_LARGE_UPLOAD_ENABLED: boolFromEnv(false),
 
   // --- Staging ---
   STAGING_DIR: z.string().default('./staging'),
@@ -152,7 +165,14 @@ export const configSchema = z.object({
   // malformed address (those gates never depended on the auth-results guess) but every
   // otherwise-valid webhook is quarantined with reason `inbound_disabled` instead of ever
   // reaching the DMARC gate — no code deploy needed to hold or resume the path.
-  INBOUND_REQUESTS_ENABLED: boolFromEnv(true),
+  //
+  // Fix pass 5, F-B (`docs/reviews/critic-report.md`): default flipped `true` -> `false`.
+  // A kill switch that defaults ON is not a kill switch — it is a feature flag nobody
+  // remembered to check, and this exact gap left a forgeable auth path wide open on any
+  // deploy that copied `.env.example` and never explicitly set this var. Spike 3
+  // (`docs/runbooks/live-spikes.md`) flips it back on once a live payload confirms the
+  // field-name guess above.
+  INBOUND_REQUESTS_ENABLED: boolFromEnv(false),
   // F-10: caps the inbound webhook's body before Fastify (and, for multipart, busboy)
   // parses any of it — sized just above Mailgun's documented payload ceiling.
   WEBHOOK_BODY_LIMIT_BYTES: intFromEnv(2 * 1024 * 1024, { min: 1 }),
@@ -163,7 +183,31 @@ export const configSchema = z.object({
   JOB_MAX_ATTEMPTS: intFromEnv(8, { min: 1 }),
 });
 
-export type Env = z.infer<typeof configSchema>;
+/**
+ * Fix pass 5, F-B (`docs/reviews/critic-report.md`): `MAILGUN_AUTHSERV_ID` has no schema
+ * default (see its own field comment) — that is fine for a config that never actually
+ * reads inbound mail, but silently letting it stay unset wherever it DOES matter is
+ * exactly how the old `INBOUND_DOMAIN` fallback (a public, guessable value) got shipped.
+ * Required whenever this config could plausibly process live inbound webhooks: a real
+ * Mailgun adapter (`ADAPTERS=real`), or the inbound path enabled in production. Cross-
+ * field, so it lives in a `superRefine` rather than the object schema itself.
+ */
+export const configSchema = baseConfigSchema.superRefine((val, ctx) => {
+  const authservIdMatters =
+    val.ADAPTERS === 'real' || (val.INBOUND_REQUESTS_ENABLED && val.NODE_ENV === 'production');
+  if (authservIdMatters && !val.MAILGUN_AUTHSERV_ID) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['MAILGUN_AUTHSERV_ID'],
+      message:
+        'MAILGUN_AUTHSERV_ID is required when ADAPTERS=real or when INBOUND_REQUESTS_ENABLED ' +
+        'is true in production — it must never fall back to INBOUND_DOMAIN (a public, ' +
+        'guessable value printed in every mailto link this product hands out).',
+    });
+  }
+});
+
+export type Env = z.infer<typeof baseConfigSchema>;
 
 export type Config = Omit<Env, 'COOKIE_SECURE'> & {
   COOKIE_SECURE: boolean;

@@ -91,16 +91,23 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — authorise-then-deliver TOCTOU 
   // ---------------------------------------------------------------- RT-13
   // `delivery.fulfill` sends first and records second. Any failure after the provider has
   // accepted the message (socket timeout on the response, pod eviction, a transient DB
-  // error on `deliveries.complete`) re-runs the WHOLE handler on retry — including the
-  // send. The webhook replay gate exists precisely because "replay is re-disclosure"
-  // (architecture.md §4.2); the same principle is not applied one layer down.
-  it('RT-13: a `delivery.fulfill` retry must not re-send the file (at-most-once disclosure)', async () => {
+  // error on `deliveries.complete`) is genuinely ambiguous — nobody, including this
+  // process, can tell whether the requester actually received the file. The webhook
+  // replay gate exists precisely because "replay is re-disclosure" (architecture.md
+  // §4.2); a retry here would risk exactly that, so fix pass 5 (F-A,
+  // `docs/reviews/critic-report.md`) makes the handler do neither: it never blindly
+  // resends AND it never claims `sent` when it does not actually know. The outcome is
+  // recorded honestly as `unconfirmed` — see `tests/review/delivery-fulfill-classification.test.ts`
+  // for the *classified* failures (a definite Mailgun non-send) that DO safely retry.
+  it('RT-13: a `delivery.fulfill` retry must neither re-send the file nor claim `sent` for an ambiguous failure', async () => {
     const container = buildTestContainer();
     const { tenant, file } = await queueOneDelivery(container);
     const recorder = container.fakes.outboundMail;
     const sentBefore = recorder.sent.length;
 
-    // The provider accepted the message; we never saw the ack.
+    // The provider accepted the message; we never saw the ack — an unclassified failure
+    // (not one of the typed PortErrors), which fix pass 5 treats as ambiguous rather than
+    // guessing either "definitely sent" or "definitely not sent".
     let failNextSend = true;
     const flaky: OutboundMailPort = {
       async send(message) {
@@ -115,13 +122,15 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — authorise-then-deliver TOCTOU 
     (container.ports as { outboundMail: OutboundMailPort }).outboundMail = flaky;
 
     await runPendingJobs(container);
-    // The queue backs the job off; a real worker picks it up on the next tick.
+    // The queue backs the job off; a real worker picks it up on the next tick. Since the
+    // ambiguous failure already finalized the delivery on the first attempt, this second
+    // drain is a no-op (there is no `delivery.fulfill` job left pending for it).
     await testPool().query(`UPDATE jobs SET run_after = now() WHERE kind = 'delivery.fulfill'`);
     await runPendingJobs(container);
 
     const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
-    expect(rows[0]?.outcome).toBe('sent');
-    // The file left the building exactly once.
+    expect(rows[0]?.outcome).toBe('unconfirmed');
+    // The provider call happened exactly once — never blindly retried while ambiguous.
     expect(recorder.sent.length - sentBefore).toBe(1);
   });
 

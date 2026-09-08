@@ -65,7 +65,12 @@ export class RequestPipeline {
       signatureToken: msg.signatureToken,
       recipientRaw: msg.recipientRaw,
       fromAddress: msg.fromAddresses[0] ?? null,
-      fromDomain: msg.fromAddresses[0]?.split('@')[1] ?? null,
+      // Fix pass 5 (critic-report.md minor findings): use the same last-`@` helper every
+      // other gate in this file uses, not a first-`@` `split`. Not security-relevant on
+      // this path (a display/audit column, not a gate), but it is the exact shape of the
+      // F-3 bug this codebase already fixed everywhere else, and reads as a regression to
+      // the next reviewer if left inconsistent.
+      fromDomain: msg.fromAddresses[0] ? addressDomain(msg.fromAddresses[0]) : null,
       dmarc: msg.dmarc,
       spf: msg.spf,
       dkim: msg.dkim,

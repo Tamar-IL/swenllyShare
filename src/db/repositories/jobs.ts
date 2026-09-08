@@ -140,30 +140,59 @@ export const jobs = {
 
   /**
    * F-5's periodic-sweep upsert (RT-53/RT-54): like `enqueue`, but a `dedupe_key` that
-   * already names a `done` job gets reactivated (`status` reset to `pending`) instead of
-   * silently no-op'd. Plain `enqueue`'s `ON CONFLICT ... DO NOTHING` is right for
-   * one-shot work (a webhook's `delivery.fulfill`, replaying it would re-send the file) —
-   * but a periodic sweep dedupe-keyed by TIME WINDOW is deliberately meant to run again
-   * for the same window if new work shows up after its first (empty, no-op) run within
-   * that window, which `DO NOTHING` would permanently block for the rest of the window.
-   * Never touches a `pending`/`processing` row — only a `done` one is reactivated, so this
-   * never disturbs a claim already in flight.
+   * already names a job in one of `reactivateStatuses` gets reactivated (`status` reset
+   * to `pending`, `attempts`/`last_error` cleared) instead of silently no-op'd. Plain
+   * `enqueue`'s `ON CONFLICT ... DO NOTHING` is right for one-shot work (a webhook's
+   * `delivery.fulfill`, replaying it would re-send the file) — but a periodic sweep
+   * dedupe-keyed by TIME WINDOW is deliberately meant to run again for the same window if
+   * new work shows up after its first (empty, no-op) run within that window, which
+   * `DO NOTHING` would permanently block for the rest of the window.
+   *
+   * `reactivateStatuses` defaults to `['done', 'dead', 'failed']` — every TERMINAL status,
+   * never `pending`/`processing`, so a still-in-flight claim is never disturbed. Fix pass
+   * 5, F-C (`docs/reviews/critic-report.md`): originally only `'done'` was reactivated,
+   * which meant a `file.expire` job that had exhausted its retries and gone `dead` (e.g. a
+   * permanently failing `revokeLink`) could NEVER be re-enqueued by
+   * `expiry.safety_sweep` — its `jobs.enqueue` call hit the same dedupe-key conflict and
+   * silently no-op'd, forever, even though the file was still visibly `ready` past its
+   * `expires_at`. Widening the reactivated-status set (and having the sweep call this
+   * instead of plain `enqueue`) closes that stranding.
+   *
+   * `run_after` is left UNTOUCHED on a reactivation unless `runAfter` is explicitly
+   * given (`COALESCE($4, jobs.run_after)`, not `EXCLUDED.run_after`/`now()`) —
+   * deliberately, not an oversight: a `now()`-stamped `run_after` compared moments later
+   * against a caller-supplied `Date` (`claimNext`'s default `now = new Date()`) races real
+   * clock skew between this process and Postgres's own clock, which is exactly the
+   * flakiness this shipped with before being caught (`docs/lessons.md`). It's also
+   * unnecessary: a `done` job's old `run_after` is already in the past; a `dead`/`failed`
+   * job's `run_after` was pushed out by AT MOST `backoffMs`'s 5-minute ceiling
+   * (`src/jobs/queue.ts`), always less than `PERIODIC_SWEEP_INTERVAL_MINUTES` (15) — so by
+   * the time a sweep reactivates it, it is already due regardless.
    */
   async ensureScheduled(
     db: Queryable,
-    params: { kind: string; payload?: unknown; dedupeKey: string; runAfter?: Date },
+    params: {
+      kind: string;
+      payload?: unknown;
+      dedupeKey: string;
+      runAfter?: Date;
+      reactivateStatuses?: JobStatus[];
+    },
   ): Promise<void> {
+    const reactivateStatuses = params.reactivateStatuses ?? ['done', 'dead', 'failed'];
     await db.query(
       `INSERT INTO jobs (kind, payload, dedupe_key, run_after)
        VALUES ($1, $2, $3, COALESCE($4, now()))
        ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL
-       DO UPDATE SET status = 'pending', locked_at = NULL
-       WHERE jobs.status = 'done'`,
+       DO UPDATE SET status = 'pending', attempts = 0, last_error = NULL,
+                      run_after = COALESCE($4, jobs.run_after), locked_at = NULL
+       WHERE jobs.status = ANY($5)`,
       [
         params.kind,
         JSON.stringify(params.payload ?? {}),
         params.dedupeKey,
         params.runAfter ?? null,
+        reactivateStatuses,
       ],
     );
   },
@@ -189,14 +218,18 @@ export const jobs = {
       await jobs.cancelByDedupeKey(db, dedupeKey);
       return;
     }
-    await db.query(
-      `INSERT INTO jobs (kind, payload, dedupe_key, run_after)
-       VALUES ('file.expire', $2, $1, $3)
-       ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL
-       DO UPDATE SET run_after = EXCLUDED.run_after, status = 'pending', attempts = 0,
-                      locked_at = NULL, last_error = NULL`,
-      [dedupeKey, JSON.stringify({ tenantId, fileId }), expiresAt],
-    );
+    // Unlike `ensureScheduled`'s default (terminal statuses only), a sender explicitly
+    // changing a file's expiry must win over WHATEVER the job's current status is,
+    // including a still-`pending`/`processing` prior schedule (a sender re-extending an
+    // expiry needs the new date to take, not to be ignored because a job row already
+    // existed) — so every `JobStatus` is passed as `reactivateStatuses`.
+    await jobs.ensureScheduled(db, {
+      kind: 'file.expire',
+      payload: { tenantId, fileId },
+      dedupeKey,
+      runAfter: expiresAt,
+      reactivateStatuses: ['pending', 'processing', 'done', 'failed', 'dead'],
+    });
   },
 
   /**

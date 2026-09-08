@@ -19,7 +19,11 @@ describe('loadConfig', () => {
     expect(config.ADAPTERS).toBe('fake');
     expect(config.BRANDED_PAGE_ENABLED).toBe(false);
     expect(config.ATTACH_LIMIT_BYTES).toBe(20_971_520);
-    expect(config.MAX_UPLOAD_BYTES).toBe(1_073_741_824);
+    // Fix pass 5, F-G (docs/reviews/critic-report.md): defaults to the corroborated
+    // simple-upload ceiling, not the old 1GB (which routed >250MB uploads into an
+    // unverified, modeled-guess chunked-upload path by default).
+    expect(config.MAX_UPLOAD_BYTES).toBe(262_144_000);
+    expect(config.ZOHO_LARGE_UPLOAD_ENABLED).toBe(false);
     expect(config.STAGING_RETENTION_HOURS).toBe(24);
     expect(config.DRIVE_SHARE_SOFT_CAP).toBe(500);
     expect(config.SHARE_PACE_MIN_INTERVAL_MS).toBe(1500);
@@ -37,7 +41,9 @@ describe('loadConfig', () => {
     expect(config.RATE_DOMAIN_PER_HOUR).toBe(30);
     expect(config.QUARANTINE_PER_TOKEN_PER_HOUR).toBe(5);
     expect(config.INBOUND_AUTH_SOURCE).toBe('both');
-    expect(config.INBOUND_REQUESTS_ENABLED).toBe(true);
+    // Fix pass 5, F-B (docs/reviews/critic-report.md): a kill switch that defaults ON is
+    // not a kill switch — default flipped false.
+    expect(config.INBOUND_REQUESTS_ENABLED).toBe(false);
     expect(config.WEBHOOK_BODY_LIMIT_BYTES).toBe(2 * 1024 * 1024);
     expect(config.MAILGUN_AUTHSERV_ID).toBeUndefined();
   });
@@ -110,5 +116,39 @@ describe('loadConfig', () => {
 
   it('rejects an out-of-enum NODE_ENV', () => {
     expect(() => loadConfig({ ...REQUIRED_ENV, NODE_ENV: 'staging' })).toThrowError();
+  });
+
+  describe('F-B: MAILGUN_AUTHSERV_ID is required wherever it would actually matter', () => {
+    it('rejects ADAPTERS=real with no MAILGUN_AUTHSERV_ID', () => {
+      expect(() => loadConfig({ ...REQUIRED_ENV, ADAPTERS: 'real' })).toThrowError(
+        /MAILGUN_AUTHSERV_ID/,
+      );
+    });
+
+    it('accepts ADAPTERS=real once MAILGUN_AUTHSERV_ID is set', () => {
+      expect(() =>
+        loadConfig({ ...REQUIRED_ENV, ADAPTERS: 'real', MAILGUN_AUTHSERV_ID: 'mxa.mailgun.org' }),
+      ).not.toThrow();
+    });
+
+    it('rejects INBOUND_REQUESTS_ENABLED=true in production with no MAILGUN_AUTHSERV_ID', () => {
+      expect(() =>
+        loadConfig({
+          ...REQUIRED_ENV,
+          NODE_ENV: 'production',
+          INBOUND_REQUESTS_ENABLED: 'true',
+        }),
+      ).toThrowError(/MAILGUN_AUTHSERV_ID/);
+    });
+
+    it('does not require MAILGUN_AUTHSERV_ID with ADAPTERS=fake outside production', () => {
+      expect(() => loadConfig(REQUIRED_ENV)).not.toThrow();
+    });
+
+    it('does not require MAILGUN_AUTHSERV_ID in production when INBOUND_REQUESTS_ENABLED stays false', () => {
+      expect(() =>
+        loadConfig({ ...REQUIRED_ENV, NODE_ENV: 'production', INBOUND_REQUESTS_ENABLED: 'false' }),
+      ).not.toThrow();
+    });
   });
 });

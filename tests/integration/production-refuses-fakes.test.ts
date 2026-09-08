@@ -8,6 +8,9 @@ const REQUIRED_ENV = {
   INBOUND_DOMAIN: 'share.example.com',
   DATABASE_URL: 'postgres://unused/unused',
   SESSION_SECRET: 'x'.repeat(32),
+  // Fix pass 5, F-B (docs/reviews/critic-report.md): required by loadConfig whenever
+  // ADAPTERS=real, which several tests below set.
+  MAILGUN_AUTHSERV_ID: 'mxa.mailgun.org',
 };
 
 describe.skipIf(!hasTestDatabase())('production refuses fake adapters (architecture.md §9)', () => {

@@ -24,6 +24,9 @@ export interface FileRow {
   staging_blob_id: string | null;
   status: FileStatus;
   created_at: Date;
+  /** Fix pass 5, F-C: the last dead-lettered `file.expire` failure, or `null` if this
+   * file's expiry has never gotten stuck. See `recordExpiryError`/`clearExpiryError`. */
+  expiry_error: string | null;
 }
 
 export interface CreateFileParams {
@@ -48,7 +51,10 @@ export interface PublishStepUpdate {
   zohoResourceId?: string;
   zohoLinkId?: string;
   zohoPublicLink?: string;
-  zohoEmbedToken?: string;
+  /** `null` when the create-link response carried no distinct embed identifier (fix pass
+   * 5, F-E) — the branded page renders without an iframe in that case, never a value
+   * derived from the raw link. */
+  zohoEmbedToken?: string | null;
   driveActiveCopyId?: string;
   status?: FileStatus;
 }
@@ -133,7 +139,7 @@ export const files = {
     fileId: string,
     patch: PublishStepUpdate,
   ): Promise<FileRow | undefined> {
-    const entries = Object.entries(patch) as [keyof PublishStepUpdate, string][];
+    const entries = Object.entries(patch) as [keyof PublishStepUpdate, string | null][];
     if (entries.length === 0) {
       return files.findById(db, tenantId, fileId);
     }
@@ -245,11 +251,20 @@ export const files = {
   },
 
   /**
-   * F-5's safety net: `ready` files past their own `expires_at` with no `file.expire` job
-   * currently pending/processing. Under normal operation `create`/`updateSettings`
-   * scheduling already covers every file, so this should almost always return nothing —
-   * it exists to catch anything that scheduling missed (a file created before this fix
-   * shipped, a lost race, manual data repair) rather than to be the primary mechanism.
+   * F-5's safety net: files that need a `file.expire` attempt but have no such job
+   * currently pending/processing. Two shapes, fix pass 5 (F-C,
+   * `docs/reviews/critic-report.md`) adding the second:
+   *  - still `ready` past `expires_at` — under normal operation `create`/
+   *    `updateSettings` scheduling already covers every file, so this should almost
+   *    always return nothing; it exists to catch anything scheduling missed (a file
+   *    created before this fix shipped, a lost race, manual data repair).
+   *  - already `expired` but `expiry_error IS NOT NULL` — `handleFileExpire` flips
+   *    `status` to `expired` BEFORE attempting the external revoke, independent of
+   *    whether that revoke ever succeeds, so a permanently failing revoke leaves the file
+   *    `expired` with no live status-based signal that anything is still wrong. Without
+   *    this second clause, a file already past `status = 'ready'` would never be
+   *    rediscovered here again, and a dead-lettered `file.expire` job would never be
+   *    reactivated — the exact stranding the critic reproduced.
    */
   async listExpiredWithoutScheduledJob(
     db: Queryable,
@@ -257,7 +272,10 @@ export const files = {
   ): Promise<FileRow[]> {
     const { rows } = await db.query<FileRow>(
       `SELECT f.* FROM files f
-       WHERE f.status = 'ready' AND f.expires_at IS NOT NULL AND f.expires_at <= now()
+       WHERE (
+           (f.status = 'ready' AND f.expires_at IS NOT NULL AND f.expires_at <= now())
+           OR (f.status = 'expired' AND f.expiry_error IS NOT NULL)
+         )
          AND NOT EXISTS (
            SELECT 1 FROM jobs j
            WHERE j.dedupe_key = 'expire:' || f.id::text
@@ -275,5 +293,40 @@ export const files = {
       tenantId,
       fileId,
     ]);
+  },
+
+  /** Fix pass 5, F-C: `file.expire`'s dead-letter hook (`src/jobs/queue.ts`) calls this
+   * when the job exhausts its retries with the revoke still failing — the one place this
+   * failure becomes visible anywhere (`/readyz`'s `strandedExpiries`, a file-page badge)
+   * instead of vanishing silently into the `jobs` table. */
+  async recordExpiryError(
+    db: Queryable,
+    tenantId: string,
+    fileId: string,
+    message: string,
+  ): Promise<void> {
+    await db.query('UPDATE files SET expiry_error = $3 WHERE tenant_id = $1 AND id = $2', [
+      tenantId,
+      fileId,
+      message,
+    ]);
+  },
+
+  /** The next time `handleFileExpire` actually completes the revoke — including on a
+   * reactivated retry after a prior dead-letter — clears the stranding marker. */
+  async clearExpiryError(db: Queryable, tenantId: string, fileId: string): Promise<void> {
+    await db.query(
+      `UPDATE files SET expiry_error = NULL WHERE tenant_id = $1 AND id = $2 AND expiry_error IS NOT NULL`,
+      [tenantId, fileId],
+    );
+  },
+
+  /** `/readyz`'s stranded-expiry count (F-C) — system-wide, not tenant-scoped, matching
+   * `listStagingPurgeCandidates`'s existing precedent for an ops-facing sweep query. */
+  async countStrandedExpiries(db: Queryable): Promise<number> {
+    const { rows } = await db.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM files WHERE expiry_error IS NOT NULL',
+    );
+    return Number(rows[0]?.count ?? '0');
   },
 };

@@ -309,8 +309,12 @@ and asserts exactly one Drive file exists for that intent.
 
 Browser `POST /api/files` (multipart, XHR from the island for progress) → `@fastify/multipart`
 streams the part directly to `BlobStagingPort.put()` (local disk in MVP; path configurable), with
-a hard byte cap at `MAX_UPLOAD_BYTES` (**default 1 GB**, config; the UX brief's "5 GB" is a
-placeholder pending the Zoho plan limit — founder fork §12). Row inserted `status='staged'`,
+a hard byte cap at `MAX_UPLOAD_BYTES` (**default 250 MB**, config — fix pass 5, F-G,
+`docs/reviews/critic-report.md`: the corroborated Zoho WorkDrive simple-upload ceiling;
+raise it once spike 1, `docs/runbooks/live-spikes.md`, confirms the >250MB chunked-upload
+shape, or set `ZOHO_LARGE_UPLOAD_ENABLED=true` once a founder has explicitly accepted that
+risk — the UX brief's "5 GB" is a placeholder pending the Zoho plan limit — founder fork
+§12). Row inserted `status='staged'`,
 `file.publish` job enqueued, response returns immediately with the file id; the per-file page
 polls `GET /api/files/:id/status` until `ready`.
 
@@ -384,20 +388,26 @@ caps sign-in requests per IP and per email (`RATE_MAGICLINK_PER_HOUR`, default 5
 
 ```
 NODE_ENV PORT LOG_LEVEL PUBLIC_BASE_URL INBOUND_DOMAIN
-DATABASE_URL PGPOOL_MAX=10
+DATABASE_URL PGPOOL_MAX=10 PG_SSL=false
 SESSION_SECRET COOKIE_SECURE
 ADAPTERS=fake|real            ADAPTER_OVERRIDES="drive=fake,zoho=real"   # dev only
 BRANDED_PAGE_ENABLED=false
-ATTACH_LIMIT_BYTES=20971520   MAX_UPLOAD_BYTES=1073741824
+ATTACH_LIMIT_BYTES=20971520   MAX_UPLOAD_BYTES=262144000   # fix pass 5, F-G: 250MB, not 1GB
 STAGING_DIR                   STAGING_RETENTION_HOURS=24
 DRIVE_SHARE_SOFT_CAP=500      SHARE_PACE_MIN_INTERVAL_MS=1500
 DEFAULT_EXPIRY_DAYS=30
 RATE_REQUESTER_PER_HOUR=5 RATE_FILE_PER_HOUR=60 RATE_TENANT_PER_HOUR=300 RATE_MAGICLINK_PER_HOUR=5
-RAW_PAYLOAD_RETENTION_DAYS=7
+RATE_DOMAIN_PER_HOUR=30
+RAW_PAYLOAD_RETENTION_DAYS=7  QUARANTINE_PER_TOKEN_PER_HOUR=5
 GOOGLE_CREDENTIAL_MODE=service_account|oauth_refresh  GOOGLE_SA_JSON_PATH
 GOOGLE_IMPERSONATE_SUBJECT GOOGLE_SHARED_DRIVE_ID GOOGLE_ROOT_FOLDER_ID
+GOOGLE_OAUTH_CLIENT_ID GOOGLE_OAUTH_CLIENT_SECRET GOOGLE_OAUTH_REFRESH_TOKEN  # oauth_refresh mode
 ZOHO_CLIENT_ID ZOHO_CLIENT_SECRET ZOHO_REFRESH_TOKEN ZOHO_API_BASE ZOHO_TEAM_FOLDER_ID
+ZOHO_ACCOUNTS_BASE ZOHO_LINK_ROLE_ID=6 ZOHO_LARGE_UPLOAD_ENABLED=false  # fix pass 5, F-G
 MAILGUN_API_BASE MAILGUN_API_KEY MAILGUN_SIGNING_KEY MAILGUN_SENDING_DOMAIN OUTBOUND_FROM
+MAILGUN_AUTHSERV_ID           INBOUND_AUTH_SOURCE=both      # fix pass 5, F-B: required with
+INBOUND_REQUESTS_ENABLED=false                              # ADAPTERS=real or in production
+WEBHOOK_BODY_LIMIT_BYTES=2097152
 WORKER_ENABLED=true WORKER_CONCURRENCY=4 JOB_MAX_ATTEMPTS=8
 ```
 

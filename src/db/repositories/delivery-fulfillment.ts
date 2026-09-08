@@ -106,4 +106,71 @@ export const deliveryFulfillment = {
       [tenantId, deliveryId],
     );
   },
+
+  /**
+   * Fix pass 5, F-A (`docs/reviews/critic-report.md`): a *definite* non-send classified
+   * from a completed exchange (`TransientError`/`PermanentError`/`QuotaClassError`/
+   * `NotFoundError` — the provider told us, unambiguously, that nothing was delivered) —
+   * safe, and correct, to retry the WHOLE delivery from scratch, exactly like a crash
+   * before `markSending`. Reverting to `sending` (not `queued`) skips redundantly
+   * re-running the F-4 gate re-check that already just ran this same attempt; the
+   * `sending` branch in `handleDeliveryFulfill` re-derives everything else. `lastError` is
+   * written to `reason` as a non-terminal diagnostic breadcrumb — `deliveries.complete`
+   * overwrites it with the real terminal reason once this delivery actually finishes.
+   */
+  async revertDispatchingToSending(
+    db: Queryable,
+    tenantId: string,
+    deliveryId: string,
+    lastError: string,
+  ): Promise<void> {
+    await db.query(
+      `UPDATE deliveries SET outcome = 'sending', reason = $3
+       WHERE tenant_id = $1 AND id = $2 AND outcome = 'dispatching'`,
+      [tenantId, deliveryId, lastError],
+    );
+  },
+
+  /**
+   * Fix pass 5, F-A: the Drive-share path's second CAS step. `markDispatching` covers the
+   * permission-grant call; once `SharingEngine.share` actually succeeds, this moves the
+   * row to `granted` (recording `drive_copy_id`/`mechanism` at the same time) BEFORE the
+   * follow-up reply email is attempted. A retry that finds `granted` therefore knows the
+   * grant already happened — re-running `SharingEngine.share()` would be redundant
+   * (harmless per its own doc comment on over-counting, but wasteful) and, more
+   * importantly, is no longer necessary: `handleDeliveryFulfill`'s `granted` branch
+   * re-sends only the reply, using the `drive_copy_id` recorded right here.
+   */
+  async markGranted(
+    db: Queryable,
+    tenantId: string,
+    deliveryId: string,
+    driveCopyId: string,
+  ): Promise<DeliveryFulfillmentRow | undefined> {
+    const { rows } = await db.query<DeliveryFulfillmentRow>(
+      `UPDATE deliveries SET outcome = 'granted', mechanism = 'drive_share', drive_copy_id = $3
+       WHERE tenant_id = $1 AND id = $2 AND outcome = 'dispatching'
+       RETURNING *`,
+      [tenantId, deliveryId, driveCopyId],
+    );
+    return rows[0];
+  },
+
+  /**
+   * Fix pass 5, F-A: the reply-only retry path — the grant already succeeded
+   * (`markGranted`), a *definite* non-send classified the reply attempt, so the row stays
+   * `granted` (never re-shares) and just records the diagnostic for the next retry.
+   */
+  async recordGrantedRetryError(
+    db: Queryable,
+    tenantId: string,
+    deliveryId: string,
+    lastError: string,
+  ): Promise<void> {
+    await db.query(
+      `UPDATE deliveries SET reason = $3
+       WHERE tenant_id = $1 AND id = $2 AND outcome = 'granted'`,
+      [tenantId, deliveryId, lastError],
+    );
+  },
 };

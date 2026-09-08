@@ -120,6 +120,41 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — public share surface', () => {
     );
   });
 
+  it(
+    'CRITIC F-E (docs/reviews/critic-report.md): a null embedToken (no distinct embed ' +
+      'field in the create-link response) renders the branded page WITHOUT an iframe, ' +
+      'never falling back to a substring of the raw Zoho link',
+    async () => {
+      const container = buildTestContainer({ BRANDED_PAGE_ENABLED: true });
+      const app = await buildApp({ container });
+      // Forces this file's publish-time createPublicLink call to return embedToken:
+      // null, the same shape the real adapter now returns whenever Zoho's response
+      // carries no embed_url/embed_link (fix pass 5, F-E — the old real-adapter fallback
+      // derived a token from the raw link's own trailing path segment instead).
+      container.fakes.fileStore.forceNullEmbedTokenOnNextLink();
+      const { file } = await createTenantWithReadyFile(container, 'null-embed@example.com');
+      expect(file.zoho_embed_token).toBeNull();
+      expect(file.zoho_public_link).toBeTruthy();
+
+      const page = await app.inject({ method: 'GET', url: `/s/${file.public_slug}` });
+      expect(page.statusCode).toBe(200);
+      expect(page.body).not.toContain('<iframe');
+      expect(page.body).toContain(`href="/s/${file.public_slug}/download"`);
+
+      // No iframe at all — but assert the stronger, critic-specified property too: no
+      // response surface (body or headers) contains ANY substring of the raw Zoho
+      // link's own path of at least 12 characters (not just the whole string, which the
+      // sibling "leak" test above already covers) — a derived-token leak would surface
+      // as exactly this kind of partial match.
+      const rawPath = new URL(file.zoho_public_link!).pathname;
+      const pageSurface = page.body + JSON.stringify(page.headers);
+      for (let i = 0; i + 12 <= rawPath.length; i++) {
+        const chunk = rawPath.slice(i, i + 12);
+        expect(pageSurface).not.toContain(chunk);
+      }
+    },
+  );
+
   it('OBSERVED: neither public route is rate-limited (slug enumeration is unthrottled)', async () => {
     // Not exploitable against a 130-bit slug, but it is the only unauthenticated GET
     // surface in the product and `rateLimit` is registered `{ global: false }`, so it has

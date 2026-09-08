@@ -28,7 +28,12 @@ export function registerPublicShareRoutes(app: FastifyInstance, container: Conta
       return reply.view('share-expired.eta', { title: 'הקישור אינו פעיל', hideFooter: true });
     }
 
-    const embedSrc = `https://workdrive.zohoexternal.com/embed/${file.zoho_embed_token}?toolbar=false&appearance=light`;
+    // Fix pass 5, F-E (docs/reviews/critic-report.md): `zoho_embed_token` is `null`
+    // whenever `createPublicLink`'s response carried no distinct embed identifier — never
+    // fall back to rendering an iframe from anything derived from the raw Zoho link.
+    const embedSrc = file.zoho_embed_token
+      ? `https://workdrive.zohoexternal.com/embed/${file.zoho_embed_token}?toolbar=false&appearance=light`
+      : null;
     return reply.view('share-page.eta', {
       title: file.display_name,
       hideFooter: true,

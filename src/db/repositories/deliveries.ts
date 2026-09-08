@@ -2,7 +2,19 @@ import type { Queryable } from '../pool.js';
 
 export type DeliveryMechanism = 'attachment' | 'drive_share';
 export type DeliveryOutcome =
-  'queued' | 'sent' | 'failed' | 'quarantined' | 'rate_limited' | 'expired' | 'not_allowlisted';
+  | 'queued'
+  | 'sent'
+  // Fix pass 5, F-A: a genuinely unresolvable send — an `AmbiguousSendError` from the
+  // outbound call, or a bare process crash on a `dispatching` row with no recorded
+  // definite error. Never `sent` (the requester may not have received the file), never
+  // silently `failed` (it may well have gone out) — recorded honestly as its own terminal
+  // state (src/jobs/handlers/delivery-fulfill.ts).
+  | 'unconfirmed'
+  | 'failed'
+  | 'quarantined'
+  | 'rate_limited'
+  | 'expired'
+  | 'not_allowlisted';
 
 export interface DeliveryRow {
   id: string;

@@ -15,7 +15,7 @@ precedence: [`docs/00-README.md`](docs/00-README.md).
 
 ## Status: built, unverified against live providers
 
-**312 tests pass** (`pnpm test`, real Postgres + semantic fakes for every provider). **Zero live
+**340 tests pass** (`pnpm test`, real Postgres + semantic fakes for every provider). **Zero live
 calls have been made to Google Drive, Zoho WorkDrive, or Mailgun by anyone on this project** —
 every real adapter method is `@unverified-live` in
 [`docs/verification-ledger.md`](docs/verification-ledger.md) (generated from those markers, CI
@@ -85,31 +85,40 @@ required, 32+ chars · `COOKIE_SECURE` derived from `NODE_ENV` · `ADAPTERS`=fak
 `ADAPTER_OVERRIDES` dev-only, e.g. `"drive=fake,zoho=real"`.
 
 **Limits** — `ATTACH_LIMIT_BYTES`=20MB (attachment vs. Drive-share threshold) ·
-`MAX_UPLOAD_BYTES`=1GB (founder-open, see below) · `STAGING_DIR`=./staging,
-`STAGING_RETENTION_HOURS`=24 · `DRIVE_SHARE_SOFT_CAP`=500, `SHARE_PACE_MIN_INTERVAL_MS`=1500
-(auto-duplication margin + pacing) · `DEFAULT_EXPIRY_DAYS`=30 ·
-`RATE_REQUESTER/FILE/TENANT/DOMAIN_PER_HOUR`=5/60/300/30 (sliding-window inbound limits) ·
-`RATE_MAGICLINK_PER_HOUR`=5 (sign-in, per IP+email) · `RAW_PAYLOAD_RETENTION_DAYS`=7 ·
-`QUARANTINE_PER_TOKEN_PER_HOUR`=5 (caps unauthenticated writes) · `WEBHOOK_BODY_LIMIT_BYTES`=2MB
-(enforced pre-parse) · `WORKER_CONCURRENCY`=4, `JOB_MAX_ATTEMPTS`=8.
+`MAX_UPLOAD_BYTES`=250MB (the corroborated Zoho simple-upload ceiling — fix pass 5, F-G; see
+below), `ZOHO_LARGE_UPLOAD_ENABLED`=false (refuses, rather than attempts, the unverified >250MB
+chunked-upload path) · `STAGING_DIR`=./staging, `STAGING_RETENTION_HOURS`=24 ·
+`DRIVE_SHARE_SOFT_CAP`=500, `SHARE_PACE_MIN_INTERVAL_MS`=1500 (auto-duplication margin + pacing) ·
+`DEFAULT_EXPIRY_DAYS`=30 · `RATE_REQUESTER/FILE/TENANT/DOMAIN_PER_HOUR`=5/60/300/30
+(sliding-window inbound limits) · `RATE_MAGICLINK_PER_HOUR`=5 (sign-in, per IP+email) ·
+`RAW_PAYLOAD_RETENTION_DAYS`=7 · `QUARANTINE_PER_TOKEN_PER_HOUR`=5 (caps unauthenticated writes) ·
+`WEBHOOK_BODY_LIMIT_BYTES`=2MB (enforced pre-parse) · `WORKER_CONCURRENCY`=4, `JOB_MAX_ATTEMPTS`=8.
 
 **Providers** — `GOOGLE_CREDENTIAL_MODE`=service_account|oauth_refresh + SA/OAuth vars (Workspace SA
 or no-Workspace fallback) · `ZOHO_CLIENT_ID`/`_SECRET`/`_REFRESH_TOKEN`, `ZOHO_API_BASE`/
 `_ACCOUNTS_BASE`, `ZOHO_TEAM_FOLDER_ID`, `ZOHO_LINK_ROLE_ID`=6 (WorkDrive OAuth + DC host + folder
-
-- link role) · `MAILGUN_API_BASE`/`_API_KEY`/`_SIGNING_KEY`/`_SENDING_DOMAIN`, `OUTBOUND_FROM` ·
-  `MAILGUN_AUTHSERV_ID` (defaults to `INBOUND_DOMAIN` — a guess until spike 3),
-  `INBOUND_AUTH_SOURCE`=both (which source(s) the DMARC mapper trusts).
+link role) · `MAILGUN_API_BASE`/`_API_KEY`/`_SIGNING_KEY`/`_SENDING_DOMAIN`, `OUTBOUND_FROM` ·
+`MAILGUN_AUTHSERV_ID` (fix pass 5, F-B: **required** whenever `ADAPTERS=real` or
+`INBOUND_REQUESTS_ENABLED=true` in production — `loadConfig` refuses to boot otherwise; must be a
+genuine Mailgun-assigned value, never `INBOUND_DOMAIN`, which is public and guessable),
+`INBOUND_AUTH_SOURCE`=both (which source(s) the DMARC mapper trusts).
 
 **Flags** — `BRANDED_PAGE_ENABLED`=false (branded page vs. raw Zoho link; `/s/*` 404s while off) ·
-`WORKER_ENABLED`=true · `INBOUND_REQUESTS_ENABLED`=true (kill switch — `false` quarantines inbound
-mail before the DMARC gate, no deploy needed).
+`WORKER_ENABLED`=true · `INBOUND_REQUESTS_ENABLED`=false (kill switch, fix pass 5 default —
+`true` opens the DMARC-gated inbound mail path; stays off until spike 3 confirms the
+DMARC/SPF/DKIM field-name guess against a live payload).
 
 ## Security model
 
-- **DMARC from provider-asserted results only.** Read only from Mailgun's `Authentication-Results`
-  entry or an allowlisted field set — never the flat namespace attacker-controlled MIME headers
-  also occupy; a `pass` with no domain to align against is quarantined.
+- **DMARC read from `message-headers`-backed sources only, fail-closed otherwise.** When
+  Mailgun's `message-headers` array is present, DMARC/SPF/DKIM come from Mailgun's own
+  synthetic fields or a `message-headers` `Authentication-Results` entry whose authserv-id
+  matches `MAILGUN_AUTHSERV_ID` exactly — never the flat namespace attacker-controlled MIME
+  headers also occupy. When `message-headers` is absent, every auth field reads `unknown`
+  and the request is quarantined — the anti-forgery check that distinguishes a genuine
+  provider field from an attacker's own header depends entirely on it being present, so
+  its absence can never be treated as a pass (fix pass 5, F-B). A `pass` with no domain to
+  align against is quarantined either way.
 - **Token-only file resolution.** An address resolves to a file by its opaque `request_token`
   alone — never subject/body/slug; the distribution link's `public_slug` is a separate token.
 - **Deliver to the verified From address only.** Reply-To/Sender/Cc/Bcc/body-named addresses are
@@ -117,7 +126,7 @@ mail before the DMARC gate, no deploy needed).
 - **Rate limits at every level.** Per requester, requester-domain, file, and tenant — Postgres
   sliding windows — so no address trick or domain can exhaust a budget.
 - **Audit log and a kill switch.** Every attempt is logged and queryable per file;
-  `INBOUND_REQUESTS_ENABLED` holds the inbound path shut with no deploy.
+  `INBOUND_REQUESTS_ENABLED` (default `false`) holds the inbound path shut with no deploy.
 
 Findings + fix status: [red-team](docs/security/red-team-report.md),
 [appsec](docs/security/appsec-review.md).
@@ -139,5 +148,8 @@ window and the no-Google-account gap. Plus two forks from
 
 - **Google account type → AC-R4.** Email-OTP visitor sharing is Workspace-only; a consumer Gmail
   central account degrades AC-R4 to "recipient needs a Google account" — a product decision.
-- **Upload ceiling.** `MAX_UPLOAD_BYTES` defaults to 1 GB; the UX brief's "5 GB" is a placeholder
-  pending the real Zoho plan limit.
+- **Upload ceiling.** `MAX_UPLOAD_BYTES` defaults to 250 MB (fix pass 5, F-G: the corroborated
+  Zoho simple-upload ceiling — the old 1 GB default routed every upload above 250 MB into
+  `uploadLargeFile`'s unverified, modeled-guess chunked-upload path); raise it once spike 1
+  confirms that shape, or set `ZOHO_LARGE_UPLOAD_ENABLED=true` to accept the risk explicitly.
+  The UX brief's "5 GB" is a placeholder pending the real Zoho plan limit.

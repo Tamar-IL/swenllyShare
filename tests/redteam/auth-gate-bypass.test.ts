@@ -2,7 +2,11 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { hasTestDatabase, truncateAll } from '../setup/db.js';
 import { buildTestContainer } from '../setup/container.js';
 import { createTenantWithReadyFile } from '../setup/fixtures.js';
-import { authenticationResultsHeader, buildSignedWebhookPayload } from '../setup/webhook.js';
+import {
+  authenticationResultsHeader,
+  buildSignedWebhookPayload,
+  pushMessageHeader,
+} from '../setup/webhook.js';
 import { deliveries } from '../../src/db/repositories/deliveries.js';
 import { fileAllowlist } from '../../src/db/repositories/file-allowlist.js';
 import { files } from '../../src/db/repositories/files.js';
@@ -113,10 +117,16 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — inbound auth gate (AC-R1/AC-R3
 
   // ---------------------------------------------------------------- RT-02
   // Gate 6's DMARC-alignment check is `if (msg.dmarcDomain && ...)`. `dmarcDomain` comes
-  // from three GUESSED key names. If the provider reports the evaluated domain under any
-  // other name — or reports it inside `Authentication-Results`, which is the actual RFC
-  // 8601 carrier — the mapper returns null and the alignment check silently disappears.
-  // `dmarc` fails CLOSED to 'unknown' on the same uncertainty; `dmarcDomain` fails OPEN.
+  // from recognized fields only. If the provider reports the evaluated domain under any
+  // OTHER, unrecognized name, the mapper returns null and the alignment check correctly
+  // fails closed rather than silently disappearing.
+  //
+  // Fix pass 5, F-B update: this test used to set `payload['Authentication-Results']` as
+  // a bare top-level field — exactly the un-authserv-id-validated "degraded fallback"
+  // critic finding F-B deleted entirely (`docs/reviews/critic-report.md`). That field is
+  // now simply never read, so the assertion below flips: the mapper genuinely cannot see
+  // ANY evaluated domain (not even a wrong one) when it is only ever reported under an
+  // unrecognized key name — proving the root cause even more directly than before.
   it('RT-02: DMARC alignment must fail closed when the evaluated domain cannot be read from the payload', async () => {
     const container = buildTestContainer();
     const { tenant, file } = await createTenantWithReadyFile(container, 'rt02@example.com');
@@ -124,22 +134,26 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — inbound auth gate (AC-R1/AC-R3
     const payload = buildSignedWebhookPayload(container, {
       requestToken: file.request_token,
       tenantSlug: tenant.slug,
-      // DMARC was evaluated against the relay's domain...
-      fromAddress: 'ceo@victim-corp.test', // ...but the header claims someone else.
-      dmarc: 'pass',
+      fromAddress: 'ceo@victim-corp.test',
+      // Deliberately not using the `dmarc` option (it auto-supplies a well-formed,
+      // recognized evaluated domain) — this test wants a `pass` whose ONLY reported
+      // evaluated domain lives under unrecognized key names.
     });
-    // The evaluated domain, reported under a key the mapper does not know about.
+    payload.dmarc = 'pass';
+    // The evaluated domain, reported ONLY under keys the mapper does not recognize.
     payload['Authentication-Results'] =
-      'mx.mailgun.org; dmarc=pass header.from=attacker-relay.test';
+      'mxa.mailgun.test; dmarc=pass header.from=attacker-relay.test';
     payload['X-Mailgun-Dmarc-Evaluated-Domain'] = 'attacker-relay.test';
 
-    // Proof of the root cause: the mapper cannot see the evaluated domain at all.
-    expect(mapMailgunInboundPayload(payload).dmarcDomain).not.toBeNull();
+    // Proof of the root cause: the mapper cannot see ANY evaluated domain at all — not
+    // even the attacker's own claimed one — because neither field name is recognized.
+    expect(mapMailgunInboundPayload(payload).dmarcDomain).toBeNull();
 
     const outcome = await container.services.requestPipeline.handleWebhook(payload);
     expect(outcome.deliveryId).toBeUndefined();
     const rows = await deliveries.listForFile(container.pool, tenant.id, file.id);
     expect(rows[0]?.outcome).toBe('quarantined');
+    expect(rows[0]?.reason).toBe('dmarc_alignment_unknown');
   });
 
   // ---------------------------------------------------------------- RT-03
@@ -243,13 +257,18 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — inbound auth gate (AC-R1/AC-R3
       // alongside it (that IS what a provider-asserted pass looks like) — a bare
       // `dmarc=pass` with no domain at all now quarantines (`dmarc_alignment_unknown`),
       // so this case, like SANITY below, supplies one via a real `Authentication-Results`
-      // header (mapping.ts source (a)) rather than the guessed `dmarc` field alone. The
+      // header (mapping.ts source (b)) rather than the guessed `dmarc` field alone. The
       // case/whitespace variance under test moves into the header's own `dmarc=` value,
       // which `parseAuthenticationResultsValue`'s regex is equally tolerant of.
-      payload['Authentication-Results'] = authenticationResultsHeader({
-        dmarc: dmarcValue,
-        headerFrom: 'relay.test',
-      });
+      //
+      // Fix pass 5, F-B: pushed into `message-headers` via `pushMessageHeader`, not set
+      // as a bare top-level field — the old top-level-only "degraded fallback" this
+      // relied on is deleted entirely (`docs/reviews/critic-report.md`).
+      pushMessageHeader(
+        payload,
+        'Authentication-Results',
+        authenticationResultsHeader({ dmarc: dmarcValue, headerFrom: 'relay.test' }),
+      );
       const outcome = await container.services.requestPipeline.handleWebhook(payload);
       expect(outcome.deliveryId).toBeDefined();
     },
@@ -267,7 +286,11 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — inbound auth gate (AC-R1/AC-R3
       tenantSlug: tenant.slug,
       fromAddress: 'legit@relay.test',
     });
-    payload['Authentication-Results'] = authenticationResultsHeader({ headerFrom: 'relay.test' });
+    pushMessageHeader(
+      payload,
+      'Authentication-Results',
+      authenticationResultsHeader({ headerFrom: 'relay.test' }),
+    );
     const outcome = await container.services.requestPipeline.handleWebhook(payload);
     expect(outcome.deliveryId).toBeDefined();
   });

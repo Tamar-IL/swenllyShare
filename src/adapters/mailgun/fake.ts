@@ -70,6 +70,7 @@ interface RecordedSend {
   subject: string;
   text: string;
   attachment?: { filename: string; size: number; contentType: string };
+  deliveryId?: string;
 }
 
 /** Semantic fake for `OutboundMailPort`: records every send for assertion in tests. */
@@ -81,6 +82,7 @@ export class FakeOutboundMail implements OutboundMailPort {
     subject: string;
     text: string;
     attachment?: OutboundAttachment;
+    deliveryId?: string;
   }): Promise<{ providerMessageId: string }> {
     this.sent.push({
       to: message.to,
@@ -93,6 +95,7 @@ export class FakeOutboundMail implements OutboundMailPort {
             contentType: message.attachment.contentType,
           }
         : undefined,
+      deliveryId: message.deliveryId,
     });
 
     // Frontend-engineer addition, dev-only: this class only ever exists when

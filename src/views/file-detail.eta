@@ -1,7 +1,7 @@
 <%/* Per-file page — the product's core screen (UX brief §1.4, §4; visual-spec.md §4.3,
     §5). Data contract:
       it.file {
-        id, displayName, isExpired, isPublishing, isFailed,
+        id, displayName, isExpired, isPublishing, isFailed, hasExpiryError,
         pillClass, statusLabel, uploadedAtLabel, expiryMetaLabel,
         customMessage: string|null, expiryMode: 'none'|'days'|'custom',
         expiresAtIso: string|null, allowlistMode: 'open'|'allowlist',
@@ -45,6 +45,12 @@
   <% if (it.file.isFailed) { %>
   <div class="notice notice-danger" role="alert">
     ההעלאה נכשלה. ניתן למחוק את הקובץ ולנסות שוב.
+  </div>
+  <% } %>
+  <% if (it.file.hasExpiryError) { %>
+  <div class="notice notice-danger" role="alert">
+    <svg class="icon" aria-hidden="true"><use href="#icon-alert-circle" /></svg>
+    לא הצלחנו לוודא שהקישור בוטל בפועל לאחר פקיעת התוקף. הצוות שלנו ינסה שוב באופן אוטומטי.
   </div>
   <% } %>
 
