@@ -306,3 +306,174 @@ Two migrations were added: `0003_delivery_dispatching_state.sql` (finding 2's
 `README.md`, which fails at HEAD independent of this pass (untouched by this fix pass,
 owned by the concurrent technical-writer session per `CLAUDE.md`) — flagging rather than
 fixing it, since it's out of this pass's scope.
+
+---
+
+## Polish pass review — 2026-09-10 (code-reviewer)
+
+**Scope:** `git diff 00dfa99..HEAD` only (the two-commit "polish pass"): logger wiring
+(`src/logger.ts`), quarantine suppression rows + nullable `requester_address` + `expiry_mode`/
+`expiry_days` (migration `0006`), per-tenant Zoho/Drive folders, the resend route +
+`AuditService.resendDelivery` + `RateLimitService.checkResend`, the e2e smoke test, and the
+per-run test DB harness. **Verification method:** read every changed file plus its call
+sites; wrote throwaway probes under `tests/review/*.probe.test.ts` (already covered by the
+`integration` project's `tests/review/**/*.test.ts` glob); ran the full suite against real
+Postgres (`scripts/dev-db.sh`). Result: 371 passed, 4 expected-fail (my `it.fails` pins,
+below), 7 live-skips — no regression, nothing under `src/**` touched by this review.
+
+### Must-fix (verified)
+
+#### 1. [HIGH] Migration 0006 doesn't backfill `expiry_mode` — every pre-existing file with a real expiry silently loses it on the next unrelated settings save
+
+`src/db/migrations/0006_quarantine_suppression_and_expiry_mode.sql`: `expiry_mode` is added
+`NOT NULL DEFAULT 'none'` with no backfill `UPDATE`. Postgres's fast-default fills every
+row that existed before this migration — including every file that already has a real
+`expires_at` (the common case: `DEFAULT_EXPIRY_DAYS` gives every file an expiry unless the
+sender explicitly turns it off) — with the literal default, `'none'`, regardless of
+`expires_at`. `src/http/routes/files.ts`'s `expiryMode: file.expiry_mode` then pre-selects
+the "no expiry" radio for a file that still very much expires, and because
+`src/domain/settings.ts`'s settings form always submits `expiryMode` on every save, saving
+the form for ANY OTHER reason (renaming the file, adding an allowlist entry) sets
+`patch.expiresAt = null` via `resolveExpiry('none', ...)` — silently and permanently
+disabling that file's expiry. Reproduced end-to-end against a scratch database seeded to
+look exactly like pre-migration data (migrations 0001–0005, insert a file with
+`expires_at` set, then apply 0006): `expiry_mode` comes back `'none'` next to a live,
+future `expires_at`.
+
+**Fix:** add `UPDATE files SET expiry_mode = 'custom' WHERE expires_at IS NOT NULL AND
+expiry_mode = 'none';` after the `ALTER TABLE` (in a follow-up migration, since 0006 is
+presumably already applied in some environments — never edit an applied migration file).
+`'custom'` is the honest guess (preserves the exact stored date; there is no way to recover
+whether it was originally `days`-mode).
+
+**Pinned:** `tests/review/expiry-mode-migration-backfill.probe.test.ts` (`it.fails`).
+
+#### 2. [MEDIUM-HIGH] Per-tenant folder `ensureFolder` (Zoho + Drive adapters) races on concurrent first uploads and has no identity across a process restart
+
+`src/adapters/zoho/real.ts` (`ensureFolder`, ~L399) and `src/adapters/google/real.ts`
+(`ensureFolder`, ~L275) both do a plain check-then-act against a **private, in-memory**
+`Map<tenantName, folderId>` with no lock, no persisted folder id anywhere in the schema
+(no `tenants.zoho_folder_id`/`drive_folder_id` column), and no lookup-by-name fallback
+against the real API. Two concrete consequences, both reproduced:
+
+  - Two concurrent first uploads for the same tenant both miss the empty cache and both
+    issue a folder-create call — two folders for one tenant, and whichever response wins
+    the cache-write is followed inconsistently by the two callers' subsequent state.
+  - A fresh adapter instance (i.e. every process restart — routine in this single-process
+    deployable, not just a crash) has an empty cache and, having no way to look up "does
+    this tenant already have a folder," unconditionally creates ANOTHER one. Every restart
+    permanently forks a tenant's storage into one more folder, forever — directly
+    contradicting the fix's own doc comment ("creates (**or reuses**) one folder per
+    tenant").
+
+Neither gap is a tenant-isolation break (files still land under *some* folder belonging to
+the correct tenant name), but it defeats the stated purpose of the change and will visibly
+fragment tenants' storage over time in production. Compare to `SharingEngine.provision`
+(architecture.md §5), which solves the identical "don't double-create under concurrency,
+survive a restart" problem for Drive copies via an advisory lock + a unique DB constraint +
+an `intent_key` recovery lookup — the same idiom should apply here (at minimum: persist the
+resolved folder id on `tenants`, and look it up before ever creating).
+
+**Pinned:** `tests/review/tenant-folder-race.probe.test.ts` (2× `it.fails`, one per gap).
+
+#### 3. [MEDIUM] The resend button never appears on deliveries that arrive via live polling — only on the initial page render
+
+`src/public/island.js`'s `prependRow` (~L333) builds exactly 4 `<td>`s (address,
+mechanism, status, date) for a polled-in delivery row; `src/views/file-detail.eta`'s table
+now has a 5th column (actions/resend, added in this pass). `GET /api/files/:id/deliveries`
+(`src/http/routes/api-files.ts` ~L74) also never returns `canResend` or a CSRF token in its
+JSON items. Net effect: a delivery that transitions to `failed`/`unconfirmed`
+*after* the sender already has the page open — the normal case, since the worker sets that
+outcome asynchronously, well after the page's initial SSR — never gets a resend button
+until the sender manually reloads the page. This is precisely the scenario the deliveries
+poller exists for (UX brief §4: "must update promptly"), so the one feature this pass
+built (N-2, "no way to resend") is silently unavailable for exactly the deliveries most
+likely to need it. Also a minor layout defect independent of the button: polled-in rows
+have one fewer `<td>` than the header has `<th>`s.
+
+**Fix:** have `/api/files/:id/deliveries` include `canResend` (and the file's CSRF token,
+or switch the resend action to use the existing CSRF header the island already sends on
+its upload XHR) in each item, and teach `prependRow` to render the 5th cell/form the same
+way the server template does.
+
+#### 4. [LOW-MEDIUM] `tests/e2e/smoke.e2e.ts`'s `bootApp()` leaks the child process on a failed readiness wait
+
+`bootApp` (~L103–149) does `const child = spawn(...)` and then `await waitForCondition(...)`
+for `/healthz` with no `try`/`finally`. If the app never becomes healthy before the 20s
+timeout (a bad `DATABASE_URL`, a port collision, or a genuine boot regression — exactly the
+case a smoke test exists to catch), the `await` rejects and `bootApp` never returns the
+`AppHandle` that carries the only `.stop()` able to kill `child`. The caller's
+`app = await bootApp(...)` in `beforeAll` then never completes, so `app` stays `undefined`
+and `afterAll`'s `app?.stop()` is a no-op — the spawned process (booted with
+`WORKER_ENABLED=true` against the shared/per-run test database) is leaked for the life of
+the CI runner. Reproduced the identical control-flow shape (spawn, then a throwing awaited
+condition, no cleanup) against a real child process and confirmed it outlives the throw.
+
+**Fix:** wrap the readiness wait in `try { ... } catch (err) { child.kill('SIGKILL'); throw
+err; }`.
+
+**Pinned (control-flow reproduction, not the actual e2e file):**
+`tests/review/e2e-bootApp-leak.probe.test.ts` (`it.fails`).
+
+### Should-fix / suggestions (non-blocking)
+
+- **[LOW]** The per-run test database (`tests/setup/db.ts`, `TEST_DB_PER_RUN=1`) is only
+  dropped from `globalSetup`'s returned teardown, which never runs on a hard kill (OOM,
+  a cancelled CI job, `SIGKILL`). `scripts/dev-db.sh` has no orphan-reaping subcommand.
+  Purely an operational-hygiene gap (leaked `swenlly_test_<pid>_<random>` databases
+  accumulate on the shared cluster over many cancelled runs) — worth a `dev-db.sh reap`
+  step eventually, not blocking.
+- **[LOW]** `REDACT_PATHS` (`src/logger.ts`) is entirely `req.*`-shaped (matches Fastify's
+  HTTP request-log structure). None of this pass's new `container.logger.info({ fileId,
+  tenantId, ... })`/`.error({ err }, ...)` calls log a token or address, so nothing leaks
+  today — but the same logger instance is now also called directly with flat top-level
+  fields from jobs/domain code, and the redaction list has no entry that would catch a
+  future `logger.info({ requestToken, ... })`-shaped call. Worth a second, flat-field
+  redaction path (or migrating to object-based `redact.paths` covering both shapes)
+  defensively.
+- **[Nice-to-have]** `RateLimitService.checkResend` deliberately reuses `RATE_FILE_PER_HOUR`
+  for the resend bucket (well-documented tradeoff) — fine as shipped, but a tenant actively
+  retrying failed deliveries on a busy file shares budget with inbound traffic on that same
+  file with no separate `RATE_RESEND_PER_HOUR` knob if that turns out too tight in practice.
+
+### Confirmed clean (verified, no bug found)
+
+- `deliveries.incrementSuppressed`'s `INSERT ... ON CONFLICT ... DO UPDATE` against the
+  migration 0006 partial unique index is race-safe under real concurrency: 25 concurrent
+  over-cap quarantine attempts collapsed into exactly one aggregate row with the correct
+  count and zero constraint-violation errors surfaced to callers.
+- Resend does **not** bypass `delivery.fulfill`'s expiry/allowlist re-checks — a resent
+  delivery on a file that expired *after* the original attempt correctly finalizes
+  `expired`, never `sent` (`checkGatesOrTerminal` runs on every `queued` job regardless of
+  how it was enqueued).
+- Resend is correctly tenant- and file-scoped (`deliveries.findById(tenantId, fileId,
+  deliveryId)`); a cross-tenant delivery id 404s, matching AC-A3 and every other
+  tenant-scoped route in this file.
+- No boundary-rule violations in this diff: the new resend HTTP route contains no SQL/
+  business logic (delegates entirely to `AuditService.resendDelivery`); domain services
+  only reach ports/repositories, never adapters directly; only repository modules issue SQL.
+- The `expiry_mode`/`expiry_days` round-trip is correct for files created or edited
+  *after* this migration — the bug is narrowly the migration's silent backfill gap
+  (finding 1), not the new read/write logic itself.
+
+### Files touched by this review
+
+Added (not `src/**`, not committed):
+`tests/review/expiry-mode-migration-backfill.probe.test.ts`,
+`tests/review/tenant-folder-race.probe.test.ts`,
+`tests/review/incrementSuppressed-concurrency.probe.test.ts`,
+`tests/review/resend-respects-expiry-gate.probe.test.ts`,
+`tests/review/e2e-bootApp-leak.probe.test.ts`.
+Nothing under `src/**` was touched; nothing was committed.
+
+### Verdict
+
+**Needs-work.** Finding 1 (expiry-mode backfill) is a real data-integrity regression that
+will silently disable expiry on existing files in any environment this migration has
+already run against and must be fixed with a follow-up backfill migration before this ships
+further. Finding 2 (folder-create race/no-restart-identity) undermines the per-tenant-folder
+feature's own stated purpose and should be fixed before it fragments any tenant's real
+storage. Findings 3–4 are real but narrower (a UX gap on the polling path; a CI-only
+process leak) and can ride in the same or a fast-follow pass. Everything else in this diff
+— the suppression-row aggregation, the null-requester-address plumbing, the resend feature's
+tenant scoping and gate re-checks, and the logger consolidation — is solid.
