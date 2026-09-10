@@ -104,9 +104,13 @@ CI (`.github/workflows/ci.yml`) runs typecheck → lint → prettier check → u
    least 512MB** at the defaults above, and re-derive this number (baseline + `ATTACH_LIMIT_
    BYTES × WORKER_CONCURRENCY`, times ~1.5–2x headroom) before raising either config value in
    production. This is a memory-sizing note, not a fix — the buffering itself is unchanged.
-7. **Health endpoints:** `GET /healthz` (process alive) and `GET /readyz` (`{ok, db,
-   pendingJobs}` — DB reachable) — point your platform's liveness/readiness probes at these
-   respectively; the `Dockerfile`'s `HEALTHCHECK` uses `/healthz`.
+7. **Health endpoints:** `GET /healthz` (process alive) and `GET /readyz` — DB reachable,
+   plus operator-visible counters that grew alongside the fix passes: `{ok, db,
+   pendingJobs, sweepsHealthy, sweeps, strandedExpiries, unconfirmedDeliveries}`.
+   `strandedExpiries` (fix pass 5, F-C) and `unconfirmedDeliveries` (fix pass 6, N-2) are
+   operator signals, not readiness failures — `ok`/`db` alone gate the probe itself.
+   Point your platform's liveness/readiness probes at `/healthz`/`/readyz` respectively;
+   the `Dockerfile`'s `HEALTHCHECK` uses `/healthz`.
 8. **Log redaction:** pino redacts `authorization`, `cookie`, `signature`, `token`,
    `request_token`, `public_slug`, `*_refresh_token`, `MAILGUN_*`, and request bodies on
    `/signin` and the webhook (architecture §10) — do not add ad-hoc `console.log`s that

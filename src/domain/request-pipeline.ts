@@ -115,12 +115,16 @@ export class RequestPipeline {
 
     const tenantForSlug = await tenants.findBySlug(this.pool, parsedAddress.slug);
     if (!tenantForSlug || tenantForSlug.id !== file.tenant_id) {
+      // Fix pass 7 (critic-report.md Minor): `requesterAddress` is undefined here only
+      // when `From` carried zero addresses — record `null`, never `msg.recipientRaw`
+      // (the file's OWN inbound address, not anything about the requester; migration
+      // 0006 made the column nullable for exactly this).
       await this.quarantine(
         parsedAddress.token,
         inboundRow,
         file.tenant_id,
         file.id,
-        requesterAddress ?? msg.recipientRaw,
+        requesterAddress ?? null,
         msg.dmarc,
         'tenant_slug_mismatch',
       );
@@ -134,7 +138,7 @@ export class RequestPipeline {
         inboundRow,
         file.tenant_id,
         file.id,
-        requesterAddress ?? msg.recipientRaw,
+        requesterAddress ?? null,
         msg.dmarc,
         `dmarc_${msg.dmarc}`,
       );
@@ -144,12 +148,18 @@ export class RequestPipeline {
     // Gate 6: From-address sanity — exactly one address, domain matches DMARC's evaluated
     // domain when the provider reports one.
     if (msg.fromAddresses.length !== 1 || !requesterAddress || !fromDomain) {
+      // Fix pass 7 (critic-report.md Minor): this branch also fires when MORE than one
+      // `From` address was present — `requesterAddress` (the first one) is deliberately
+      // NOT used even though it happens to be defined, because picking one of several
+      // candidates would misattribute the request to an address we can't actually single
+      // out. `null` ("we don't know"), never `msg.recipientRaw` (a real value, but the
+      // wrong one — the file's own inbound address, not the requester's).
       await this.quarantine(
         parsedAddress.token,
         inboundRow,
         file.tenant_id,
         file.id,
-        msg.recipientRaw,
+        null,
         msg.dmarc,
         'from_address_invalid',
       );
@@ -278,16 +288,24 @@ export class RequestPipeline {
    * been handed a mailto link can trigger this path with zero authentication of their
    * own, so the write itself must be bounded, not just the *rate* of delivery. Beyond
    * `QUARANTINE_PER_TOKEN_PER_HOUR`, the counter still increments (so the cap keeps
-   * counting, cheaply) but neither `inbound_messages.quarantined`/`reason` nor a new
+   * counting, cheaply) but neither `inbound_messages.quarantined`/`reason` nor a normal
    * `deliveries` row is written — the caller still answers 200 either way (never
    * disclosing which branch fired).
+   *
+   * Fix pass 7 (critic-report.md Minor): past the cap, this no longer goes fully silent.
+   * It bumps ONE aggregate `deliveries` row per (file, calendar hour) — outcome
+   * `quarantined`, reason `suppressed`, an incrementing `suppressed_count`
+   * (`deliveries.incrementSuppressed`, migration 0006) — so the sender can see "an
+   * attack is happening" without the write itself being unbounded (still one row per
+   * hour no matter how many requests arrive) and without disclosing anything about
+   * individual suppressed attempts (no address, no reason detail).
    */
   private async quarantine(
     requestToken: string,
     inboundRow: InboundMessageRow,
     tenantId: string,
     fileId: string,
-    requesterAddress: string,
+    requesterAddress: string | null,
     dmarc: string | null,
     reason: string,
   ): Promise<void> {
@@ -296,7 +314,10 @@ export class RequestPipeline {
       `quarantine-token:${requestToken}`,
       QUARANTINE_CAP_WINDOW_MINUTES,
     );
-    if (total > this.config.QUARANTINE_PER_TOKEN_PER_HOUR) return;
+    if (total > this.config.QUARANTINE_PER_TOKEN_PER_HOUR) {
+      await deliveries.incrementSuppressed(this.pool, tenantId, fileId);
+      return;
+    }
 
     await inboundMessages.markQuarantined(this.pool, inboundRow.id, reason);
     await deliveries.insertTerminal(this.pool, {

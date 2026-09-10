@@ -80,6 +80,18 @@ interface ZohoLargeFileResponse {
   data?: { id?: string; attributes?: { resource_id?: string } };
 }
 
+/**
+ * Fix pass 7 (critic-report.md #6): `ensureFolder`'s response shape — modeled on the
+ * SAME JSON:API envelope every other WorkDrive endpoint in this file uses (`data.id` as
+ * the created resource's id), since folders and files share the `/files` endpoint on
+ * WorkDrive (a folder is a `files` resource with no content). **Unconfirmed against a
+ * live account** — no field beyond `data.id` is read, so even a materially different
+ * `attributes` shape would not break this, but the top-level envelope itself is a guess.
+ */
+interface ZohoFolderResponse {
+  data?: { id?: string };
+}
+
 interface ZohoLinkResponse {
   data?: {
     id?: string;
@@ -232,6 +244,12 @@ function extractEmbedToken(attrs: Record<string, unknown>): string | null {
  */
 export class ZohoFileStore implements FileStorePort {
   private tokenCache?: { accessToken: string; expiresAtMs: number };
+  // Fix pass 7 (critic-report.md #6, architecture.md §3/§5): in-memory, per-process
+  // cache of tenant-folder name -> WorkDrive folder id, so a tenant's second, third, ...
+  // upload reuses the same folder instead of re-creating one (`ensureFolder` below) or
+  // paying a second round trip. Keyed on the folder NAME (== the caller's `tenantId`,
+  // per `FilesService.publishFile`'s call), not the tenant id twice over.
+  private readonly tenantFolderCache = new Map<string, string>();
 
   constructor(private readonly config: ZohoFileStoreConfig) {}
 
@@ -381,6 +399,37 @@ export class ZohoFileStore implements FileStorePort {
     return { resourceId };
   }
 
+  /**
+   * @unverified-live
+   * Fix pass 7 (critic-report.md #6, architecture.md §3/§5): creates (or reuses, via
+   * `tenantFolderCache`) one WorkDrive subfolder per tenant, under `ZOHO_TEAM_FOLDER_ID`,
+   * named `name` — `POST {apiBase}/files` with a JSON:API `{data: {type: 'files',
+   * attributes: {name, parent_id}}}` body, modeled on the SAME envelope shape this file's
+   * other endpoints already use (`uploadLargeFile`'s session-init call is the closest
+   * sibling). **Unconfirmed against a live account** (`docs/runbooks/live-spikes.md`
+   * spike #1 should record whether this shape is right) — if it turns out folders need a
+   * distinct `type` value or a different endpoint entirely, this is the one place to fix
+   * it; every caller only ever sees a `folderId` string back.
+   */
+  private async ensureFolder(name: string, parentId: string): Promise<string> {
+    const cached = this.tenantFolderCache.get(name);
+    if (cached) return cached;
+    const url = `${this.config.apiBase}/files`;
+    const body = JSON.stringify({
+      data: { type: 'files', attributes: { name, parent_id: parentId } },
+    });
+    const json = await this.zohoRequest<ZohoFolderResponse>('POST', url, {
+      body,
+      extraHeaders: { 'content-type': 'application/vnd.api+json' },
+    });
+    const folderId = json.data?.id;
+    if (!folderId) {
+      throw new PermanentError('Zoho ensure-folder response contained no folder id');
+    }
+    this.tenantFolderCache.set(name, folderId);
+    return folderId;
+  }
+
   /** @unverified-live */
   async upload(
     tenantFolder: string,
@@ -388,30 +437,32 @@ export class ZohoFileStore implements FileStorePort {
     sizeBytes: number,
     name: string,
   ): Promise<{ resourceId: string }> {
-    // No per-tenant subfolder is provisioned by this port (it exposes no create-folder
-    // method) — every upload lands directly in `ZOHO_TEAM_FOLDER_ID`. `tenantFolder`
-    // (== the caller's `tenantId`, per `FilesService.publishFile`) is accepted for
-    // interface stability but not yet used to namespace storage; a real per-tenant
-    // WorkDrive folder tree is a follow-up, not required for the MVP's file-count scale.
-    // This is a design assumption, not a live-verified fact — flagged for the architect.
-    void tenantFolder;
-    const parentId = this.config.teamFolderId;
     const threshold = this.config.simpleUploadMaxBytes ?? SIMPLE_UPLOAD_MAX_BYTES;
-    if (sizeBytes <= threshold) {
-      return this.uploadSimple(parentId, stream, name);
-    }
     // Fix pass 5, F-G: refuse the unverified large-file path unless explicitly enabled —
     // see `ZohoFileStoreConfig.largeUploadEnabled`'s doc comment. A clear, immediate
     // `PermanentError` (dead-letters `file.publish` with a sender-visible "upload failed"
     // rather than burning the job's retry budget against an endpoint shape nobody has
     // confirmed) is strictly better than silently attempting it against production data.
-    if (!this.config.largeUploadEnabled) {
+    // Fix pass 7 (#6): checked BEFORE `ensureFolder` below, so a refused upload still
+    // attempts ZERO requests, not one (the folder lookup/creation) — preserving F-G's
+    // exact invariant now that a second network call sits in front of every upload.
+    if (sizeBytes > threshold && !this.config.largeUploadEnabled) {
       throw new PermanentError(
         `Zoho large-file upload path (>${threshold} bytes) is disabled ` +
           '(ZOHO_LARGE_UPLOAD_ENABLED=false) — its request/response shape is an unverified ' +
           "guess (see uploadLargeFile's doc comment); confirm it against a live account " +
           '(docs/runbooks/live-spikes.md spike #1) before enabling it.',
       );
+    }
+    // Fix pass 7 (critic-report.md #6): every upload used to land directly in
+    // `ZOHO_TEAM_FOLDER_ID` regardless of `tenantFolder` (== the caller's `tenantId`,
+    // per `FilesService.publishFile`) — no per-tenant isolation existed in the Zoho half
+    // of the storage layer despite architecture.md §3/§5 requiring it. `ensureFolder`
+    // resolves (or creates, once, then caches) that tenant's own subfolder; every upload
+    // for this tenant lands under it instead of the shared team root.
+    const parentId = await this.ensureFolder(tenantFolder, this.config.teamFolderId);
+    if (sizeBytes <= threshold) {
+      return this.uploadSimple(parentId, stream, name);
     }
     return this.uploadLargeFile(parentId, stream, sizeBytes, name);
   }

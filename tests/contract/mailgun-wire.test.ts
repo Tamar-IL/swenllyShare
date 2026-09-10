@@ -199,16 +199,34 @@ describe('MailgunOutboundAdapter.send — offline wire-shape tests', () => {
     );
   });
 
-  it('throws PermanentError when a 2xx response carries no message id', async () => {
+  // Second re-check, N-3 (docs/reviews/critic-report.md): a 2xx response IS Mailgun's
+  // definite acceptance of the message, regardless of what the body did or didn't say
+  // afterward — this used to throw `PermanentError` ("definite non-send") for an
+  // exchange Mailgun accepted, the same "guess in the confident direction" mistake F-A
+  // fixed on the request side, pointed at the response side. Both shapes below are
+  // definite accepts now: `providerMessageId: null`, never a thrown error.
+  it('a 2xx response with no message id in the body is a definite accept, not PermanentError', async () => {
     const pool = mockAgent.get('https://api.mailgun.test');
     pool
       .intercept({ path: pathnameIs('/v3/mail.swenlly.test/messages'), method: 'POST' })
       .reply(200, { message: 'Queued, but no id?!' });
     const adapter = new MailgunOutboundAdapter(CONFIG);
 
-    await expect(adapter.send({ to: 'a@b.com', subject: 's', text: 't' })).rejects.toBeInstanceOf(
-      PermanentError,
-    );
+    await expect(adapter.send({ to: 'a@b.com', subject: 's', text: 't' })).resolves.toEqual({
+      providerMessageId: null,
+    });
+  });
+
+  it('a 2xx response with an unparseable (non-JSON) body is a definite accept, not PermanentError', async () => {
+    const pool = mockAgent.get('https://api.mailgun.test');
+    pool
+      .intercept({ path: pathnameIs('/v3/mail.swenlly.test/messages'), method: 'POST' })
+      .reply(200, 'not json at all');
+    const adapter = new MailgunOutboundAdapter(CONFIG);
+
+    await expect(adapter.send({ to: 'a@b.com', subject: 's', text: 't' })).resolves.toEqual({
+      providerMessageId: null,
+    });
   });
 
   it('stamps a deterministic v:swenlly-delivery custom variable and Message-Id when deliveryId is given', async () => {

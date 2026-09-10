@@ -27,6 +27,13 @@ export interface FileRow {
   /** Fix pass 5, F-C: the last dead-lettered `file.expire` failure, or `null` if this
    * file's expiry has never gotten stuck. See `recordExpiryError`/`clearExpiryError`. */
   expiry_error: string | null;
+  // Fix pass 7 (critic-report.md Minor, migration 0006): the settings FORM's own choice
+  // — independent of the `expires_at` timestamp `Settings.resolveExpiry` derives from it
+  // — so the per-file page can re-render the mode/day count the sender actually picked
+  // rather than reverse-guessing from a raw timestamp (a `days`-mode expiry and a
+  // `custom`-mode expiry landing on the same date are otherwise indistinguishable).
+  expiry_mode: 'none' | 'days' | 'custom';
+  expiry_days: number | null;
 }
 
 export interface CreateFileParams {
@@ -40,6 +47,11 @@ export interface CreateFileParams {
   stagingBlobId?: string | null;
   customMessage?: string | null;
   expiresAt?: Date | null;
+  // Fix pass 7 (critic-report.md Minor): the form-level choice behind `expiresAt` — see
+  // `FileRow.expiry_mode`/`expiry_days`'s doc comment. Both default at the DB layer
+  // (`'none'`/`NULL`) when omitted.
+  expiryMode?: 'none' | 'days' | 'custom';
+  expiryDays?: number | null;
   allowlistMode?: AllowlistMode;
 }
 
@@ -63,6 +75,10 @@ export interface UpdateSettingsParams {
   displayName?: string;
   customMessage?: string | null;
   expiresAt?: Date | null;
+  // Fix pass 7 (critic-report.md Minor): see `FileRow.expiry_mode`/`expiry_days`'s doc
+  // comment — always set together with `expiresAt` by `SettingsService.updateSettings`.
+  expiryMode?: 'none' | 'days' | 'custom';
+  expiryDays?: number | null;
   allowlistMode?: AllowlistMode;
 }
 
@@ -89,8 +105,8 @@ export const files = {
       `INSERT INTO files (
          tenant_id, display_name, original_name, size_bytes, mime,
          request_token, public_slug, staging_blob_id, custom_message, expires_at,
-         allowlist_mode
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'open'))
+         allowlist_mode, expiry_mode, expiry_days
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'open'), COALESCE($12, 'none'), $13)
        RETURNING *`,
       [
         params.tenantId,
@@ -104,6 +120,8 @@ export const files = {
         params.customMessage ?? null,
         params.expiresAt ?? null,
         params.allowlistMode ?? null,
+        params.expiryMode ?? null,
+        params.expiryDays ?? null,
       ],
     );
     const row = rows[0];
@@ -173,6 +191,8 @@ export const files = {
       displayName: 'display_name',
       customMessage: 'custom_message',
       expiresAt: 'expires_at',
+      expiryMode: 'expiry_mode',
+      expiryDays: 'expiry_days',
       allowlistMode: 'allowlist_mode',
     };
     const entries = Object.entries(patch) as [keyof UpdateSettingsParams, unknown][];

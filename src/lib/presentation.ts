@@ -1,5 +1,9 @@
 import type { FileRow } from '../db/repositories/files.js';
-import type { DeliveryMechanism, DeliveryOutcome } from '../db/repositories/deliveries.js';
+import type {
+  DeliveryMechanism,
+  DeliveryOutcome,
+  DeliveryRow,
+} from '../db/repositories/deliveries.js';
 
 /**
  * Frontend-engineer addition (Lane C): pure view-formatting helpers shared by the HTML
@@ -76,6 +80,26 @@ const MECHANISM_LABELS: Record<DeliveryMechanism, string> = {
 
 export function mechanismLabel(mechanism: DeliveryMechanism | null): string {
   return mechanism ? MECHANISM_LABELS[mechanism] : '—';
+}
+
+/**
+ * Fix pass 7 (critic-report.md Minor): the sender-facing "who received this" column for
+ * one `deliveries` row. Two honest-but-not-a-real-address cases, both introduced by
+ * migration 0006:
+ *  - the F-7 aggregate `suppressed` row (`deliveries.incrementSuppressed`) has no single
+ *    requester at all — it renders the count of additional pre-authentication quarantine
+ *    writes this hour suppressed past the per-token cap, never an address.
+ *  - an ordinary row whose `From` address couldn't be resolved to exactly one address
+ *    has `requester_address = null` — rendered as "we don't know", never the file's own
+ *    inbound address (the bug this replaced) or any other stand-in value.
+ */
+export function deliveryAddressLabel(
+  d: Pick<DeliveryRow, 'requester_address' | 'reason' | 'suppressed_count'>,
+): string {
+  if (d.reason === 'suppressed' && d.suppressed_count != null) {
+    return `${d.suppressed_count} נוספות הושתקו`;
+  }
+  return d.requester_address ?? 'לא ניתן לזהות שולח';
 }
 
 const HEBREW_MONTHS = [

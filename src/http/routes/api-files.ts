@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Container } from '../../container.js';
 import { requireSessionApi } from '../plugins/auth.js';
 import { AppError, ErrorCode } from '../../lib/errors.js';
+import { deliveryAddressLabel } from '../../lib/presentation.js';
 
 /** `POST /api/files` (streamed multipart upload) and the file-status/deliveries JSON
  * endpoints (architecture.md §6, §11). */
@@ -74,7 +75,7 @@ export function registerApiFileRoutes(app: FastifyInstance, container: Container
       return {
         items: items.map((d) => ({
           id: d.id,
-          address: d.requester_address,
+          address: deliveryAddressLabel(d),
           mechanism: d.mechanism,
           outcome: d.outcome,
           at: d.created_at.toISOString(),

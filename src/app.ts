@@ -46,27 +46,21 @@ export interface BuildAppOptions {
 export async function buildApp({ container }: BuildAppOptions): Promise<FastifyInstance> {
   const { config } = container;
 
-  const app = Fastify({
-    logger: {
-      level: config.LOG_LEVEL,
-      // Redaction list per architecture.md §10 — never log secrets or capability
-      // tokens, even at debug level.
-      redact: {
-        paths: [
-          'req.headers.authorization',
-          'req.headers.cookie',
-          'req.headers["x-mailgun-signature"]',
-          'req.headers["x-csrf-token"]',
-          'req.body.signature',
-          'req.body.token',
-          'req.body.request_token',
-          'req.body.public_slug',
-          'req.body.email',
-        ],
-        censor: '[redacted]',
-      },
-    },
-  });
+  // Fix pass 7 (docs/reviews/critic-report.md Minor): pass `container.logger` (built by
+  // `server.ts`/`worker.ts`, `src/logger.ts`) in via Fastify 5's `loggerInstance` option
+  // (a pre-built pino instance — the plain `logger` option only accepts a config object
+  // as of Fastify 5, not an instance) rather than building a second, separately-
+  // configured pino here. This is the change that makes an HTTP request log and a
+  // job/domain log line (`container.logger.info(...)`) share the exact same redaction
+  // list (architecture.md §10) instead of two lists that could silently drift apart.
+  //
+  // The cast is a type-level-only friction, not a behavior change: passing
+  // `loggerInstance` makes TS infer this instance's exact (pino) logger type as
+  // `FastifyInstance`'s Logger generic, which then fails to structurally satisfy the
+  // plain `FastifyBaseLogger` every route-registration function below (and everywhere
+  // else in this codebase) is typed against. The runtime object is unchanged — still
+  // `container.logger`, still logging through the same redaction list.
+  const app = Fastify({ loggerInstance: container.logger }) as unknown as FastifyInstance;
 
   await app.register(cookie, { secret: config.SESSION_SECRET });
   await app.register(formbody);

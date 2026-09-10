@@ -141,6 +141,13 @@ export class SettingsService {
         { days: input.expiryDays, expiresAt: input.expiresAt },
         clock,
       );
+      // Fix pass 7 (critic-report.md Minor): persist the FORM's own choice alongside the
+      // derived `expires_at` timestamp (migration 0006) — `resolveExpiry` above already
+      // validated it (throws before this point on a bad `days`/missing `expiresAt`), so
+      // this mirrors exactly what was just computed, never a second, divergent decision.
+      patch.expiryMode = input.expiryMode;
+      patch.expiryDays =
+        input.expiryMode === 'days' ? (input.expiryDays ?? this.config.DEFAULT_EXPIRY_DAYS) : null;
     }
     if (input.allowlistMode !== undefined) patch.allowlistMode = input.allowlistMode;
 

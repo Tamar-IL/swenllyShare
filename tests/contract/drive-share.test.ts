@@ -57,6 +57,7 @@ for (const scenario of scenarios) {
       async () => {
         const content = Buffer.from('drive contract test payload');
         const { driveFileId } = await port.uploadResumable(
+          `contract-test-tenant-${scenario.name}`,
           Readable.from(content),
           content.length,
           'contract-test.txt',

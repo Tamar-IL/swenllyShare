@@ -78,8 +78,9 @@ async function runDeadLetterHook(container: Container, job: JobRow): Promise<voi
       // file back to `failed`.
       const file = await files.findById(container.pool, tenantId, fileId);
       if (file?.status === 'deleted') {
-        console.log(
-          `file.publish dead-letter hook: file ${fileId} (tenant ${tenantId}) already deleted, no-op`,
+        container.logger.info(
+          { fileId, tenantId },
+          'file.publish dead-letter hook: file already deleted, no-op',
         );
         return;
       }

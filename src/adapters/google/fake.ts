@@ -8,6 +8,11 @@ interface FakeDriveFile {
   bytes: Buffer;
   appProperties: Record<string, string>;
   permissions: Set<string>;
+  // Fix pass 7 (critic-report.md #6, architecture.md §3/§5): mirrors the real adapter's
+  // `ensureFolder` cache — every file records the (cached, per-tenant-name) folder id it
+  // landed under, so a test can assert every upload/copy for one tenant shares the SAME
+  // folder id and a different tenant gets a DIFFERENT one.
+  folderId: string;
 }
 
 let counter = 0;
@@ -34,8 +39,26 @@ export class FakeDriveShare implements DriveSharePort {
   private readonly files = new Map<string, FakeDriveFile>();
   private readonly intentIndex = new Map<string, string>();
   private armedCrash = false;
+  /** Fix pass 7 (#6): tenant folder NAME -> folder id, mirroring the real adapter's
+   * in-process `ensureFolder` cache. Test inspection: `folders.size` is the number of
+   * DISTINCT tenant folders ever created. */
+  readonly folders = new Map<string, string>();
 
   constructor(private quotaPerFile: number = Number.POSITIVE_INFINITY) {}
+
+  private ensureFolder(name: string): string {
+    let folderId = this.folders.get(name);
+    if (!folderId) {
+      folderId = `drive-folder-${this.folders.size + 1}`;
+      this.folders.set(name, folderId);
+    }
+    return folderId;
+  }
+
+  /** Test inspection: which cached folder id a Drive file currently lives under. */
+  folderIdOf(driveFileId: string): string | undefined {
+    return this.files.get(driveFileId)?.folderId;
+  }
 
   setQuotaPerFile(n: number): void {
     this.quotaPerFile = n;
@@ -56,6 +79,7 @@ export class FakeDriveShare implements DriveSharePort {
   }
 
   async uploadResumable(
+    tenantFolder: string,
     stream: Readable,
     _sizeBytes: number,
     name: string,
@@ -72,6 +96,7 @@ export class FakeDriveShare implements DriveSharePort {
       bytes: Buffer.concat(chunks),
       appProperties: {},
       permissions: new Set(),
+      folderId: this.ensureFolder(tenantFolder),
     });
     return { driveFileId };
   }
@@ -88,6 +113,10 @@ export class FakeDriveShare implements DriveSharePort {
       bytes: source.bytes,
       appProperties: { swenllyIntent: intentKey },
       permissions: new Set(),
+      // Drive's real `files.copy` keeps the source's own parent when none is given
+      // (`GoogleDriveShare.copy`'s doc comment) — mirrored here so a copy always stays
+      // in the same tenant folder as its source, same as production.
+      folderId: source.folderId,
     });
     this.intentIndex.set(intentKey, newId);
 

@@ -176,6 +176,11 @@ async function* chunkReadable(stream: Readable, chunkSize: number): AsyncGenerat
  */
 export class GoogleDriveShare implements DriveSharePort {
   private authClient?: JWT | UserRefreshClient;
+  // Fix pass 7 (critic-report.md #6, architecture.md §3/§5): in-memory, per-process
+  // cache of tenant-folder name -> Drive folder id — same shape as the Zoho adapter's
+  // `tenantFolderCache` (`src/adapters/zoho/real.ts`), added while auditing this
+  // adapter for the same gap.
+  private readonly tenantFolderCache = new Map<string, string>();
 
   constructor(private readonly config: GoogleDriveShareConfig) {}
 
@@ -253,7 +258,49 @@ export class GoogleDriveShare implements DriveSharePort {
     await this.driveJson<unknown>(method, url);
   }
 
+  /**
+   * @unverified-live
+   * Fix pass 7 (critic-report.md #6, architecture.md §3/§5): auditing this adapter for
+   * the same per-tenant-folder gap the Zoho adapter had (`src/adapters/zoho/real.ts`
+   * `ensureFolder`) found it too — `uploadResumable` put every tenant's original file
+   * under the SAME configured root, with no tenant-scoped subfolder at all, despite its
+   * own doc comment claiming "into the tenant's folder". Creates (or reuses, via
+   * `tenantFolderCache`) one Drive folder per tenant under `parentId`
+   * (`GOOGLE_ROOT_FOLDER_ID` or the Shared Drive id) — `POST {DRIVE_API_BASE}/files` with
+   * `mimeType: 'application/vnd.google-apps.folder'`, Drive's own documented shape for
+   * creating a folder (unlike the Zoho equivalent, this ONE is corroborated by Drive's
+   * public API reference, not a guess — the surrounding `supportsAllDrives`/`driveId`
+   * plumbing this file already uses elsewhere is the only unverified-in-practice part).
+   * `copy()` needs no equivalent change: Drive's `files.copy` keeps the source file's own
+   * parent when none is given, so every auto-duplicated copy (`SharingEngine`) already
+   * lands in the same tenant folder as the original for free.
+   */
+  private async ensureFolder(name: string, parentId: string | undefined): Promise<string> {
+    const cached = this.tenantFolderCache.get(name);
+    if (cached) return cached;
+    const metadata: Record<string, unknown> = {
+      name,
+      mimeType: 'application/vnd.google-apps.folder',
+    };
+    if (parentId) metadata.parents = [parentId];
+    const params = new URLSearchParams({ supportsAllDrives: 'true', fields: 'id' });
+    if (this.config.sharedDriveId) params.set('driveId', this.config.sharedDriveId);
+    const url = `${DRIVE_API_BASE}/files?${params.toString()}`;
+    const json = await withRetry(() =>
+      this.driveJson<{ id?: string }>('POST', url, {
+        body: JSON.stringify(metadata),
+        extraHeaders: { 'content-type': 'application/json; charset=UTF-8' },
+      }),
+    );
+    if (!json.id) {
+      throw new PermanentError('Drive ensure-folder response contained no folder id');
+    }
+    this.tenantFolderCache.set(name, json.id);
+    return json.id;
+  }
+
   private async initiateResumableSession(
+    tenantFolder: string,
     name: string,
     mime: string,
     sizeBytes: number,
@@ -262,8 +309,11 @@ export class GoogleDriveShare implements DriveSharePort {
     // A Shared Drive requires an explicit parent within it — uploading straight to the
     // drive's root id also works as a parent value. Prefer a dedicated root folder when
     // configured (keeps the drive tidy); fall back to the drive id itself.
-    const parent = this.config.rootFolderId ?? this.config.sharedDriveId;
-    if (parent) metadata.parents = [parent];
+    // Fix pass 7 (#6): the parent is now the TENANT's own folder under that root/drive,
+    // not the root/drive itself — see `ensureFolder`'s doc comment.
+    const rootParent = this.config.rootFolderId ?? this.config.sharedDriveId;
+    const parent = await this.ensureFolder(tenantFolder, rootParent);
+    metadata.parents = [parent];
 
     const url = `${DRIVE_UPLOAD_BASE}/files?uploadType=resumable&supportsAllDrives=true`;
     const auth = await this.authHeader();
@@ -337,12 +387,15 @@ export class GoogleDriveShare implements DriveSharePort {
 
   /** @unverified-live */
   async uploadResumable(
+    tenantFolder: string,
     stream: Readable,
     sizeBytes: number,
     name: string,
     mime: string,
   ): Promise<{ driveFileId: string }> {
-    const sessionUri = await withRetry(() => this.initiateResumableSession(name, mime, sizeBytes));
+    const sessionUri = await withRetry(() =>
+      this.initiateResumableSession(tenantFolder, name, mime, sizeBytes),
+    );
 
     let uploaded = 0;
     let sawAnyChunk = false;

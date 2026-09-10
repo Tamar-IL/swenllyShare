@@ -3,7 +3,7 @@
       it.file {
         id, displayName, isExpired, isPublishing, isFailed, hasExpiryError,
         pillClass, statusLabel, uploadedAtLabel, expiryMetaLabel,
-        customMessage: string|null, expiryMode: 'none'|'days'|'custom',
+        customMessage: string|null, expiryMode: 'none'|'days'|'custom', expiryDays: number,
         expiresAtIso: string|null, allowlistMode: 'open'|'allowlist',
         allowlist: string[]
       }
@@ -18,7 +18,7 @@
                                                `(created_at, id)` keyset cursor —
                                                island.js polls /deliveries?since=&sinceId=
       it.deliverySinceId  string            — newest delivery's id, '' if none (see above)
-      it.deliveries        Array<{ address, mechanismLabel, pillClass, outcomeLabel, atLabel }>
+      it.deliveries        Array<{ id, address, mechanismLabel, pillClass, outcomeLabel, atLabel, canResend }>
 */%>
 <div class="page page-file-detail">
   <a class="back-link" href="/files">
@@ -149,7 +149,7 @@
         </label>
         <label class="radio-option">
           <input type="radio" name="expiryMode" value="days" <%= it.file.expiryMode === 'days' ? 'checked' : '' %> />
-          בעוד <input class="input input--inline" type="number" name="expiryDays" min="1" value="30" /> ימים
+          בעוד <input class="input input--inline" type="number" name="expiryDays" min="1" value="<%= it.file.expiryDays %>" /> ימים
         </label>
         <label class="radio-option">
           <input type="radio" name="expiryMode" value="custom" <%= it.file.expiryMode === 'custom' ? 'checked' : '' %> />
@@ -209,6 +209,7 @@
             <th scope="col">אופן מסירה</th>
             <th scope="col">סטטוס</th>
             <th scope="col">מועד</th>
+            <th scope="col"><span class="visually-hidden">פעולות</span></th>
           </tr>
         </thead>
         <tbody id="deliveries-tbody">
@@ -218,6 +219,14 @@
             <td data-label="אופן מסירה"><span class="tag"><%= d.mechanismLabel %></span></td>
             <td data-label="סטטוס"><span class="pill <%= d.pillClass %>"><%= d.outcomeLabel %></span></td>
             <td data-label="מועד"><span class="ltr-token"><%= d.atLabel %></span></td>
+            <td data-label="פעולות">
+              <% if (d.canResend) { %>
+              <form method="post" action="/files/<%= it.file.id %>/deliveries/<%= d.id %>/resend">
+                <input type="hidden" name="_csrf" value="<%= it.csrfToken %>" />
+                <button type="submit" class="btn btn-secondary btn-sm">שלח שוב</button>
+              </form>
+              <% } %>
+            </td>
           </tr>
           <% }) %>
         </tbody>

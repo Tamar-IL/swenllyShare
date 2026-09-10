@@ -52,6 +52,25 @@ function mockTokenRefresh(mockAgent: MockAgent): void {
     .persist();
 }
 
+/**
+ * Fix pass 7 (critic-report.md #6): every `upload()` call now resolves the caller's
+ * tenant folder first (`ensureFolder`, cached per `ZohoFileStore` instance) — one extra
+ * `POST /api/v1/files` before the actual upload request. Every test that calls
+ * `store.upload(...)` (or a variant store's) opts into this mock explicitly, same as
+ * every other endpoint-specific interceptor in this file — `mockTokenRefresh` is the
+ * one exception, shared because literally every test needs OAuth. Individual tests
+ * assert the upload's own `parent_id` against `TENANT_FOLDER_ID` (the id this mock
+ * returns), never the raw `teamFolderId` config value directly.
+ */
+const TENANT_FOLDER_ID = 'tenant-folder-1';
+function mockEnsureFolder(mockAgent: MockAgent): void {
+  const pool = mockAgent.get(API_ORIGIN);
+  pool
+    .intercept({ path: pathnameIs('/api/v1/files'), method: 'POST' })
+    .reply(200, { data: { id: TENANT_FOLDER_ID } })
+    .persist();
+}
+
 describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
   let mockAgent: MockAgent;
   let restoreDispatcher: ReturnType<typeof getGlobalDispatcher>;
@@ -95,7 +114,38 @@ describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
     // asserted implicitly by both deletes succeeding against the single cached token.
   });
 
+  it('upload: resolves the tenant folder once (JSON:API POST to /files) and reuses it across a second upload for the same tenant', async () => {
+    // Fix pass 7 (critic-report.md #6): asserts the `ensureFolder` request SHAPE
+    // directly (the other upload tests only assert the mocked response is used) and its
+    // in-process cache — a second upload for the SAME `tenantFolder` must not repeat the
+    // folder-create call at all.
+    const pool = mockAgent.get(API_ORIGIN);
+    let folderCalls = 0;
+    let folderBody: unknown;
+    pool
+      .intercept({ path: pathnameIs('/api/v1/files'), method: 'POST' })
+      .reply(async (opts) => {
+        folderCalls += 1;
+        folderBody = JSON.parse(await readMockBodyText(opts.body));
+        return { statusCode: 200, data: { data: { id: TENANT_FOLDER_ID } } };
+      })
+      .persist();
+    pool
+      .intercept({ path: pathnameIs('/api/v1/upload'), method: 'POST' })
+      .reply(200, { data: [{ attributes: { resource_id: 'res-x' } }] })
+      .persist();
+
+    await store.upload('tenant-a', Readable.from(Buffer.from('one')), 3, 'one.txt');
+    await store.upload('tenant-a', Readable.from(Buffer.from('two')), 3, 'two.txt');
+
+    expect(folderCalls).toBe(1); // cached after the first upload, not re-created
+    expect(folderBody).toMatchObject({
+      data: { type: 'files', attributes: { name: 'tenant-a', parent_id: 'team-folder-1' } },
+    });
+  });
+
   it('upload (simple path): multipart POST to /upload with parent_id + streamed content field', async () => {
+    mockEnsureFolder(mockAgent);
     const pool = mockAgent.get(API_ORIGIN);
     let capturedContentType = '';
     let capturedBody = '';
@@ -115,7 +165,11 @@ describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
     expect(result.resourceId).toBe('res-1');
     expect(capturedContentType).toMatch(/^multipart\/form-data; boundary=/);
     expect(capturedBody).toContain('name="parent_id"');
-    expect(capturedBody).toContain('team-folder-1');
+    // Fix pass 7 (#6): the upload's parent is now the TENANT's own resolved folder
+    // (`ensureFolder`, mocked via `mockEnsureFolder`), not the raw `teamFolderId` config
+    // value directly.
+    expect(capturedBody).toContain(TENANT_FOLDER_ID);
+    expect(capturedBody).not.toContain('team-folder-1');
     expect(capturedBody).toContain('name="content"; filename="doc.pdf"');
     expect(capturedBody).toContain('file content');
   });
@@ -128,6 +182,7 @@ describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
     // went straight into the multipart body unsanitized, so a CR/LF in the uploaded
     // filename could terminate that field's line early and forge extra
     // `Content-Disposition:` header lines / a bogus extra part.
+    mockEnsureFolder(mockAgent);
     const pool = mockAgent.get(API_ORIGIN);
     let capturedContentType = '';
     let capturedBody = '';
@@ -193,6 +248,7 @@ describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
       chunkSizeBytes: 4,
       largeUploadEnabled: true,
     });
+    mockEnsureFolder(mockAgent);
     const pool = mockAgent.get(API_ORIGIN);
     const content = Buffer.from('0123456789A'); // 11 bytes (> 10-byte threshold), chunked into 4+4+3
 
@@ -235,7 +291,9 @@ describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
 
     expect(initBody).toMatchObject({
       data: {
-        attributes: { parent_id: 'team-folder-1', filename: 'huge.bin', size: 11 },
+        // Fix pass 7 (#6): the large-file session's parent is also the tenant's own
+        // resolved folder, not the raw `teamFolderId`.
+        attributes: { parent_id: TENANT_FOLDER_ID, filename: 'huge.bin', size: 11 },
       },
     });
     expect(chunkBodies).toEqual(['0123', '4567', '89A']);

@@ -20,7 +20,10 @@ export interface DeliveryRow {
   id: string;
   tenant_id: string;
   file_id: string;
-  requester_address: string;
+  // Fix pass 7 (critic-report.md Minor): nullable since migration 0006 — an unparseable
+  // `From` (or the aggregate `suppressed` row below) records `null`, never a stand-in
+  // value. Rendered "לא ניתן לזהות שולח" (`src/lib/presentation.ts`).
+  requester_address: string | null;
   mechanism: DeliveryMechanism | null;
   dmarc: string | null;
   drive_copy_id: string | null;
@@ -29,6 +32,11 @@ export interface DeliveryRow {
   inbound_message_id: string | null;
   created_at: Date;
   completed_at: Date | null;
+  // Fix pass 7 (critic-report.md Minor, F-7): non-null only on the one aggregate row per
+  // (file, calendar hour) written by `incrementSuppressed` below — how many additional
+  // pre-authentication quarantine writes past `QUARANTINE_PER_TOKEN_PER_HOUR` were
+  // suppressed in that hour. `null` for every ordinary delivery row.
+  suppressed_count: number | null;
 }
 
 export const deliveries = {
@@ -46,11 +54,17 @@ export const deliveries = {
       requesterAddress: string;
       dmarc?: string | null;
       inboundMessageId?: string | null;
+      // Fix pass 7 (critic-report.md N-2, "no way to resend"): set by
+      // `AuditService.resendDelivery` (`reason: 'resend_of:<originalDeliveryId>'`) on the
+      // NEW row a resend creates — `null` for the normal inbound-pipeline path (gate 10
+      // never sets a reason on a `queued` row; a delivery's `reason` column is only ever
+      // meaningful once it completes).
+      reason?: string | null;
     },
   ): Promise<DeliveryRow> {
     const { rows } = await db.query<DeliveryRow>(
-      `INSERT INTO deliveries (tenant_id, file_id, requester_address, dmarc, inbound_message_id, outcome)
-       VALUES ($1, $2, $3, $4, $5, 'queued')
+      `INSERT INTO deliveries (tenant_id, file_id, requester_address, dmarc, inbound_message_id, outcome, reason)
+       VALUES ($1, $2, $3, $4, $5, 'queued', $6)
        RETURNING *`,
       [
         params.tenantId,
@@ -58,6 +72,7 @@ export const deliveries = {
         params.requesterAddress,
         params.dmarc ?? null,
         params.inboundMessageId ?? null,
+        params.reason ?? null,
       ],
     );
     const row = rows[0];
@@ -75,7 +90,10 @@ export const deliveries = {
     params: {
       tenantId: string;
       fileId: string;
-      requesterAddress: string;
+      // Fix pass 7 (critic-report.md Minor): `null` when the requester's `From` address
+      // could not be resolved to exactly one address — never a stand-in value like the
+      // file's own inbound address (migration 0006).
+      requesterAddress: string | null;
       outcome: Exclude<DeliveryOutcome, 'queued' | 'sent'>;
       reason?: string | null;
       dmarc?: string | null;
@@ -174,6 +192,26 @@ export const deliveries = {
     return rows;
   },
 
+  /**
+   * Fix pass 7 (critic N-2, "no way to resend"): tenant- AND file-scoped single-row
+   * lookup for `POST /files/:id/deliveries/:deliveryId/resend` — a delivery id that
+   * exists but belongs to a different tenant OR a different file on the SAME tenant
+   * both come back `undefined`, the same 404 every other tenant-scoped route in this
+   * codebase returns for a cross-tenant id (AC-A3).
+   */
+  async findById(
+    db: Queryable,
+    tenantId: string,
+    fileId: string,
+    deliveryId: string,
+  ): Promise<DeliveryRow | undefined> {
+    const { rows } = await db.query<DeliveryRow>(
+      'SELECT * FROM deliveries WHERE tenant_id = $1 AND file_id = $2 AND id = $3',
+      [tenantId, fileId, deliveryId],
+    );
+    return rows[0];
+  },
+
   async countForFile(db: Queryable, tenantId: string, fileId: string): Promise<number> {
     const { rows } = await db.query<{ count: string }>(
       'SELECT count(*)::text AS count FROM deliveries WHERE tenant_id = $1 AND file_id = $2',
@@ -208,5 +246,31 @@ export const deliveries = {
       [tenantId],
     );
     return new Map(rows.map((r) => [r.file_id, Number(r.count)]));
+  },
+
+  /**
+   * Fix pass 7 (critic-report.md Minor, F-7): `RequestPipeline`'s pre-authentication
+   * quarantine cap (`QUARANTINE_PER_TOKEN_PER_HOUR`) used to write NOTHING once a
+   * token's per-hour cap was hit — correct as DoS protection (the write itself must be
+   * bounded, not just delivery), but it let an attacker flooding a token cap the
+   * sender's own visibility into the flood. This writes/bumps ONE aggregate row per
+   * (file, calendar hour): `outcome='quarantined'`, `reason='suppressed'`,
+   * `suppressed_count` incrementing — atomically, via the partial unique index added in
+   * migration 0006, so concurrent over-cap requests in the same hour never race a
+   * read-then-write and never create a second row for the same hour.
+   */
+  async incrementSuppressed(db: Queryable, tenantId: string, fileId: string): Promise<DeliveryRow> {
+    const { rows } = await db.query<DeliveryRow>(
+      `INSERT INTO deliveries (tenant_id, file_id, requester_address, outcome, reason, suppressed_count, completed_at)
+       VALUES ($1, $2, NULL, 'quarantined', 'suppressed', 1, now())
+       ON CONFLICT (file_id, date_trunc('hour', created_at AT TIME ZONE 'UTC'))
+         WHERE reason = 'suppressed' AND outcome = 'quarantined'
+       DO UPDATE SET suppressed_count = deliveries.suppressed_count + 1, completed_at = now()
+       RETURNING *`,
+      [tenantId, fileId],
+    );
+    const row = rows[0];
+    if (!row) throw new Error('deliveries.incrementSuppressed: insert/update returned no row');
+    return row;
   },
 };

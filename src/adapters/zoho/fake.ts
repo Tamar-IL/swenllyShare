@@ -4,6 +4,12 @@ import { NotFoundError } from '../../ports/errors.js';
 
 interface FakeResource {
   tenantFolder: string;
+  // Fix pass 7 (critic-report.md #6, architecture.md §3/§5): mirrors the real adapter's
+  // `ensureFolder` cache — every resource records the (cached, per-tenant-name) folder
+  // id it landed under, so a test can assert every upload for one tenant shares the
+  // SAME folder id and a different tenant gets a DIFFERENT one, without modeling real
+  // WorkDrive folder semantics.
+  folderId: string;
   name: string;
   bytes: Buffer;
   sizeBytes: number;
@@ -32,6 +38,20 @@ function nextId(prefix: string): string {
 export class FakeFileStore implements FileStorePort {
   readonly resources = new Map<string, FakeResource>();
   readonly links = new Map<string, FakeLink>();
+  /** Fix pass 7 (#6): tenant folder NAME -> folder id, mirroring the real adapter's
+   * in-process `ensureFolder` cache. Test inspection: `folders.size` is the number of
+   * DISTINCT tenant folders ever created, regardless of how many uploads happened
+   * within each. */
+  readonly folders = new Map<string, string>();
+
+  private ensureFolder(name: string): string {
+    let folderId = this.folders.get(name);
+    if (!folderId) {
+      folderId = nextId('zoho-folder');
+      this.folders.set(name, folderId);
+    }
+    return folderId;
+  }
   /** Fix pass 5, F-E test seam: forces the NEXT `createPublicLink` call to return
    * `embedToken: null`, the same shape the real adapter returns whenever Zoho's response
    * carries no `embed_url`/`embed_link` field — lets tests exercise the branded page's
@@ -55,7 +75,8 @@ export class FakeFileStore implements FileStorePort {
     }
     const bytes = Buffer.concat(chunks);
     const resourceId = nextId('zoho-res');
-    this.resources.set(resourceId, { tenantFolder, name, bytes, sizeBytes });
+    const folderId = this.ensureFolder(tenantFolder);
+    this.resources.set(resourceId, { tenantFolder, folderId, name, bytes, sizeBytes });
     return { resourceId };
   }
 

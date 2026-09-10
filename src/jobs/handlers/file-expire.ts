@@ -45,7 +45,7 @@ export async function handleFileExpire(
   // best-effort-revoked the same Zoho link/Drive copies, so a second call here would
   // just be a wasted (and possibly erroring) retry against resources already gone.
   if (file.status === 'deleted') {
-    console.log(`file.expire: file ${fileId} (tenant ${tenantId}) already deleted, no-op`);
+    container.logger.info({ fileId, tenantId }, 'file.expire: file already deleted, no-op');
     return { status: 'done' };
   }
 

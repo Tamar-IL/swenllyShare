@@ -9,8 +9,16 @@ import type { Readable } from 'node:stream';
  * `findByIntent` instead of creating a duplicate copy.
  */
 export interface DriveSharePort {
-  /** Resumable upload of the original file into the tenant's folder on the Shared Drive. */
+  /**
+   * Resumable upload of the original file into the tenant's folder on the Shared Drive.
+   * `tenantFolder` (== the caller's `tenantId`, per `FilesService.publishFile` — the
+   * same convention `FileStorePort.upload`'s own `tenantFolder` param uses) names which
+   * tenant's folder to create-or-reuse (fix pass 7, critic-report.md #6): before this,
+   * the doc comment above already promised "into the tenant's folder" but the method
+   * took no such parameter and every tenant's files landed in one shared root.
+   */
   uploadResumable(
+    tenantFolder: string,
     stream: Readable,
     sizeBytes: number,
     name: string,

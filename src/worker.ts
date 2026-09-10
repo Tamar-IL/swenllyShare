@@ -4,6 +4,7 @@ import { createPool } from './db/pool.js';
 import { migrate } from './db/migrate.js';
 import { buildContainer } from './container.js';
 import { startWorkerLoop } from './jobs/loop.js';
+import { createLogger } from './logger.js';
 
 /**
  * Standalone worker-only entrypoint (architecture.md §1, §2: "worker loop toggleable by
@@ -14,6 +15,11 @@ import { startWorkerLoop } from './jobs/loop.js';
  */
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
+  // Fix pass 7 (docs/reviews/critic-report.md Minor): same construction as `server.ts` —
+  // one pino instance (`src/logger.ts`), threaded through `buildContainer` as
+  // `container.logger` so this standalone worker process never reaches for
+  // `console.log`/`console.error` either.
+  const logger = createLogger(config.LOG_LEVEL);
   const pool = createPool({
     connectionString: config.DATABASE_URL,
     max: config.PGPOOL_MAX,
@@ -23,17 +29,18 @@ async function main(): Promise<void> {
 
   await migrate(pool);
 
-  const container = buildContainer({ config, pool });
+  const container = buildContainer({ config, pool, logger });
   const workerLoop = startWorkerLoop(container);
 
   closeWithGrace({ delay: 10_000 }, async ({ err }) => {
-    if (err) console.error('worker: closing due to error', err);
+    if (err) container.logger.error({ err }, 'worker: closing due to error');
     await workerLoop.stop();
     await pool.end();
   });
 }
 
 main().catch((err) => {
-  console.error(err);
+  // See server.ts's identical comment: main() may fail before a container/logger exists.
+  createLogger('fatal').fatal({ err }, 'worker: fatal error during startup');
   process.exit(1);
 });

@@ -151,8 +151,11 @@ const baseConfigSchema = z.object({
   // F-1: the RFC 8601 `authserv-id` our own DMARC/SPF/DKIM verdict should be filed under
   // in a captured `Authentication-Results` header (`src/adapters/mailgun/mapping.ts`).
   // No fixed default in this schema — `@unverified-live` until a real payload is captured
-  // (docs/runbooks/live-spikes.md spike #3) — `container.ts` falls back to `INBOUND_DOMAIN`
-  // when this is unset, which is a documented guess, not a confirmed fact.
+  // (docs/runbooks/live-spikes.md spike #3). Fix pass 6 (N-8): `container.ts` no longer
+  // falls back to `INBOUND_DOMAIN` when this is unset — that fallback was deleted (fix
+  // pass 5, F-B); the only fallback left is `mapping.ts`'s own hardcoded, non-domain-
+  // specific default (`mailgun.org`), used only where `loadConfig`'s cross-field check
+  // below didn't require this var (dev/test with fake adapters and the inbound path off).
   MAILGUN_AUTHSERV_ID: z.string().optional(),
   // F-B (fix pass 6): which ONE source `mapMailgunInboundPayload` trusts for DMARC/SPF/DKIM
   // — `mailgun-fields` (Mailgun's synthetic top-level fields) or `authentication-results`
@@ -190,10 +193,19 @@ const baseConfigSchema = z.object({
  * Fix pass 5, F-B (`docs/reviews/critic-report.md`): `MAILGUN_AUTHSERV_ID` has no schema
  * default (see its own field comment) — that is fine for a config that never actually
  * reads inbound mail, but silently letting it stay unset wherever it DOES matter is
- * exactly how the old `INBOUND_DOMAIN` fallback (a public, guessable value) got shipped.
- * Required whenever this config could plausibly process live inbound webhooks: a real
- * Mailgun adapter (`ADAPTERS=real`), or the inbound path enabled in production. Cross-
- * field, so it lives in a `superRefine` rather than the object schema itself.
+ * exactly how the old `INBOUND_DOMAIN` fallback got shipped. Required whenever this
+ * config could plausibly process live inbound webhooks: a real Mailgun adapter
+ * (`ADAPTERS=real`), or the inbound path enabled in production. Cross-field, so it lives
+ * in a `superRefine` rather than the object schema itself.
+ *
+ * Fix pass 6 (N-8, corrected premise): the reason `INBOUND_DOMAIN` must never be the
+ * fallback is NOT that an authserv-id needs to be secret — no authserv-id is a secret,
+ * it is the receiving mail server's own public hostname (`run-and-deploy.md` item 4a).
+ * It is that `INBOUND_DOMAIN` is a DIFFERENT value entirely — our own domain, never
+ * Mailgun's MX hostname — so it would never match a genuine stamp at all: the gate would
+ * silently fail closed for the wrong reason, and flipping `INBOUND_AUTH_SOURCE=
+ * authentication-results` would look broken (every genuine message quarantined) instead
+ * of working.
  */
 export const configSchema = baseConfigSchema.superRefine((val, ctx) => {
   const authservIdMatters =
@@ -204,8 +216,9 @@ export const configSchema = baseConfigSchema.superRefine((val, ctx) => {
       path: ['MAILGUN_AUTHSERV_ID'],
       message:
         'MAILGUN_AUTHSERV_ID is required when ADAPTERS=real or when INBOUND_REQUESTS_ENABLED ' +
-        'is true in production — it must never fall back to INBOUND_DOMAIN (a public, ' +
-        'guessable value printed in every mailto link this product hands out).',
+        'is true in production — it must never fall back to INBOUND_DOMAIN (a different, ' +
+        "public value: OUR domain, not Mailgun's own MX hostname, so it would never match " +
+        'a genuine stamp).',
     });
   }
 });

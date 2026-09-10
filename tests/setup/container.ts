@@ -8,6 +8,7 @@ import { buildContainer, type Container } from '../../src/container.js';
 import { FakeFileStore } from '../../src/adapters/zoho/fake.js';
 import { FakeDriveShare } from '../../src/adapters/google/fake.js';
 import { FakeInboundMail, FakeOutboundMail } from '../../src/adapters/mailgun/fake.js';
+import { DEFAULT_MAILGUN_MAPPING_CONFIG } from '../../src/adapters/mailgun/mapping.js';
 import { FakeClock } from '../../src/adapters/system/fake.js';
 import { CryptoTokenGen } from '../../src/adapters/system/real.js';
 import { LocalDiskBlobStaging } from '../../src/adapters/staging/real.js';
@@ -66,7 +67,13 @@ export function buildTestContainer(
   const fileStore = new FakeFileStore();
   const driveShare = new FakeDriveShare();
   const inboundMail = new FakeInboundMail(config.MAILGUN_SIGNING_KEY ?? TEST_SIGNING_KEY, clock, {
-    authservId: config.MAILGUN_AUTHSERV_ID ?? config.INBOUND_DOMAIN,
+    // Fix pass 7 (N-8): mirrors `container.ts`'s own production fallback exactly —
+    // `INBOUND_DOMAIN` was deleted as a fallback in fix pass 5, F-B (it is public and
+    // guessable, and not even the right value: our own domain, never Mailgun's MX
+    // hostname). The only fallback left anywhere is `mapping.ts`'s own hardcoded,
+    // non-domain-specific default, used only in configs (like every test's, by default)
+    // where `MAILGUN_AUTHSERV_ID` is explicitly set anyway (`buildTestConfig` above).
+    authservId: config.MAILGUN_AUTHSERV_ID ?? DEFAULT_MAILGUN_MAPPING_CONFIG.authservId,
     authSource: config.INBOUND_AUTH_SOURCE,
   });
   const outboundMail = new FakeOutboundMail();

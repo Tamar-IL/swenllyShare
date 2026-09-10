@@ -1365,3 +1365,138 @@ than we currently describe — the default mode is unaffected either way. Second
 handful of leftover sentences in the config comments and one runbook line that describe behaviour
 that was deleted two fix passes ago. Harmless today, misleading in six months; worth ten minutes
 sometime, not now.
+
+---
+---
+
+# Fix pass 7 status (backend-engineer, 2026-09-10)
+
+Scope: the eight Minor/N-3/N-8 items the founder asked to close out, none of which were
+individually assigned to fix passes 5/6/6b and were carried forward each time as "deferred, not
+dropped." `pnpm typecheck && pnpm lint && pnpm exec prettier --check . && pnpm test && pnpm
+gen:ledger -- --check` green throughout, zero `it.fails`. Suite: **369 passed, 7 live-gated
+skips, 63 files, zero failures** (up from 356/60 at the start of this pass — 13 new tests, no
+existing test deleted or weakened to make room for them).
+
+1. **Quarantine cap silence (F-7) — FIXED.** Past `QUARANTINE_PER_TOKEN_PER_HOUR`,
+   `RequestPipeline.quarantine` (`src/domain/request-pipeline.ts`) now calls
+   `deliveries.incrementSuppressed` (`src/db/repositories/deliveries.ts`) instead of returning
+   silently: ONE aggregate row per `(file_id, calendar hour)` — `outcome='quarantined'`,
+   `reason='suppressed'`, an incrementing `suppressed_count` — written/bumped atomically via a
+   partial unique index (migration `0006`, `ON CONFLICT (file_id, date_trunc('hour', created_at AT
+   TIME ZONE 'UTC'))`). Sender-facing table shows "N נוספות הושתקו"
+   (`src/lib/presentation.ts`'s `deliveryAddressLabel`, wired into both the HTML route and the
+   JSON deliveries feed island.js polls). RT-20's bound is now `cap + 1` rows, not `cap` — one
+   extra row no matter how many over-cap requests arrive, never unbounded. Tests:
+   `tests/review/quarantine-suppression-and-null-requester.test.ts` (aggregate row shape,
+   same-hour reuse), `tests/redteam/addressing-and-routing.test.ts` RT-20 updated to the new bound.
+2. **`requester_address` on unparseable/ambiguous From — FIXED.** All three quarantine call sites
+   in `request-pipeline.ts` that used to fall back to `msg.recipientRaw` (the file's OWN inbound
+   address, not anything about the requester) now record `null` — the column is nullable as of
+   migration `0006`. UI renders "לא ניתן לזהות שולח" (same `deliveryAddressLabel` helper as #1).
+   Test: `tests/review/quarantine-suppression-and-null-requester.test.ts`'s third case (two `From`
+   addresses → `from_address_invalid` → `requester_address IS NULL`).
+3. **Logging (console → pino) — FIXED.** New `src/logger.ts` (`createLogger`, the ONE redaction
+   list, previously duplicated only in `app.ts`). `server.ts`/`worker.ts` build one instance and
+   pass it to `buildContainer` as `container.logger`; `app.ts` passes the SAME instance to Fastify
+   via `loggerInstance` (Fastify 5 renamed the plain-instance option; a `FastifyInstance` cast is
+   needed at that one call site — a type-level-only friction from pino's logger type not
+   structurally matching `FastifyBaseLogger`, not a behavior change) so HTTP and job/domain logs
+   share one format and one redaction list. Every `console.log`/`console.error` in `src/**` outside
+   `src/db/migrate.ts` (excepted by the task) is gone — `worker.ts`, `jobs/loop.ts`, `jobs/queue.ts`,
+   `jobs/handlers/file-expire.ts`, `domain/files.ts`, `server.ts` all now log through
+   `container.logger` (or, for the two "config/logger construction itself may have failed" top-
+   level `.catch`s in `server.ts`/`worker.ts`, a bare `createLogger('fatal')` — still pino, never
+   `console`). `src/adapters/mailgun/fake.ts`'s one `console.info` is untouched: it is `.log`/
+   `.error` in name only by accident of English, is dev-only terminal output with no injected
+   logger available to a semantic fake, and was explicitly out of scope ("console.log/error").
+   No new dedicated test — this is a mechanical, typecheck-verified substitution with no new
+   branching behavior; the existing suite (which exercises every one of these code paths) passing
+   with no `console.*` calls left standing (`grep -rn "console\.\(log\|error\|warn\)" src/` — zero
+   hits outside `migrate.ts`) is the verification.
+4. **N-3 (2xx-with-unreadable-body misclassified `PermanentError`) — FIXED.** `src/adapters/
+   mailgun/real.ts`'s `send()`: a 2xx response is now ALWAYS a definite accept —
+   `providerMessageId: json?.id ?? null` — regardless of whether the body was readable, parseable,
+   or carried an `id` field. `OutboundMailPort.send`'s return type widened to
+   `{providerMessageId: string | null}` (no caller persists or branches on this value). Tests:
+   `tests/contract/mailgun-wire.test.ts`'s two new cases (no `id` field; non-JSON body) replace the
+   old pinned-wrong-behavior test that asserted `PermanentError`.
+5. **Expiry mode fidelity — FIXED.** `files.expiry_mode`/`expiry_days` (migration `0006`) persist
+   the settings FORM's own choice, independent of the derived `expires_at` timestamp
+   `Settings.resolveExpiry` computes from it. `SettingsService.updateSettings` sets both together;
+   `FilesService.createStaged` seeds every new file `('days', DEFAULT_EXPIRY_DAYS)`;
+   `http/routes/files.ts`'s GET read model uses `file.expiry_mode`/`file.expiry_days` instead of
+   guessing `expires_at ? 'custom' : 'none'` (the exact bug this item names — an ordinary
+   `days`-mode expiry, which every file has by default, always rendered as "custom date"); the
+   `expiryDays` number input in `file-detail.eta` is pre-filled from the stored value instead of a
+   hardcoded `value="30"`. Test: `tests/review/expiry-mode-fidelity.test.ts` (default-days
+   rendering, switching to custom, switching to none — each asserted against both the DB row and
+   the rendered HTML).
+6. **Per-tenant folders (Zoho + Google audit) — FIXED, both adapters.** Zoho: `ensureFolder(name,
+   parentId)` (`src/adapters/zoho/real.ts`) — `POST {apiBase}/files`, a JSON:API envelope modeled
+   on this file's own conventions, `@unverified-live`, cached in-process per tenant folder name —
+   wired into `upload()`, which used to ignore `tenantFolder` entirely (`void tenantFolder;`, every
+   upload landing in the one shared `ZOHO_TEAM_FOLDER_ID`). Ordered AFTER the F-G large-file-
+   refusal check, not before, so a refused oversized upload still attempts zero requests, not one.
+   Auditing the Google adapter for the same gap (as the task asked) found it too — `uploadResumable`
+   took no tenant-folder parameter at all despite its own doc comment already claiming "into the
+   tenant's folder"; fixed the same way (`ensureFolder` on `GoogleDriveShare`, `DriveSharePort.
+   uploadResumable` widened to take `tenantFolder` as its first argument, matching
+   `FileStorePort.upload`'s convention). Drive's own `files.copy` keeps a copy's source parent when
+   none is given, so `SharingEngine`'s auto-duplicated copies land in the same tenant folder for
+   free — no change needed there. Both fakes (`zoho/fake.ts`, `google/fake.ts`) gained a matching
+   `folders`/`ensureFolder` cache so tests can assert isolation AND caching (not one folder created
+   per upload). Tests: `tests/integration/isolation.test.ts`'s new case (two tenants, three uploads,
+   same tenant shares one folder in BOTH stores, different tenants get different folders, exactly
+   one folder created per tenant despite multiple uploads); `tests/contract/zoho-workdrive-wire.test.ts`'s
+   new case (request shape + cache-reuse assertion) and updated `parent_id` assertions;
+   `tests/contract/google-drive-wire.test.ts`'s updated case (folder-create request shape +
+   the upload session's parent is the resolved tenant folder, not the raw root).
+7. **Resend action (critic N-2, "no way to resend") — FIXED.** `POST
+   /files/:id/deliveries/:deliveryId/resend` (`src/http/routes/files.ts`) — session + CSRF,
+   tenant-scoped (`AuditService.resendDelivery` looks the delivery up by `(tenantId, fileId,
+   deliveryId)` together, so a cross-tenant or cross-file id 404s exactly like every other lookup
+   in this file, AC-A3), restricted to `failed`/`unconfirmed` outcomes (409 otherwise), rate-limited
+   per file (`RateLimitService.checkResend`, a new bucket on the SAME `RATE_FILE_PER_HOUR` ceiling
+   the inbound path's own file bucket uses, on a distinct key so the two budgets can't bleed into
+   each other; 429 when exceeded). Creates a NEW `deliveries` row (`queued`, `reason:
+   'resend_of:<originalId>'`, same requester address, dmarc copied from the original) and enqueues
+   `delivery.fulfill` for it in ONE transaction — the same append-then-complete outbox shape gate
+   10 of the inbound pipeline uses (architecture.md §3 invariant 4). The deliveries table shows a
+   "שלח שוב" button on resendable rows (`file-detail.eta`), a plain form POST (works with no JS,
+   matching this app's other mutating actions). Tests: `tests/review/resend-delivery.test.ts` — all
+   four cases the task named (happy path including the enqueued job actually sending, cross-tenant
+   404, wrong-outcome 409) plus a fifth (`unconfirmed` is resendable, not just `failed`).
+8. **N-8 (stale text in the safety documents) — FIXED, the five items the critic's last pass left
+   open** (one of six was already fixed before this pass, per the critic's own accounting).
+   `docs/runbooks/live-spikes.md:229` ("the F-1 kill switch, default true") now states the true
+   default (`false`) and that the spike needs it off anyway, not "set specially for the spike."
+   `src/config.ts`'s `MAILGUN_AUTHSERV_ID` field comment and the `superRefine` validation message
+   no longer claim `container.ts` falls back to `INBOUND_DOMAIN` (deleted in fix pass 5) or frame
+   the authserv-id's required-ness as being about secrecy — corrected to the real reason
+   (`INBOUND_DOMAIN` is a different, public value that would never match a genuine stamp, not a
+   guessable secret one). `.env.example`'s matching comment gets the same correction. `docs/
+   runbooks/run-and-deploy.md` item 7's `/readyz` shape updated from the fix-pass-4-era `{ok, db,
+   pendingJobs}` to the current `{ok, db, pendingJobs, sweepsHealthy, sweeps, strandedExpiries,
+   unconfirmedDeliveries}`, with a note that the two newer counters are operator signals, not
+   readiness failures. `tests/setup/container.ts:69`'s `?? config.INBOUND_DOMAIN` (the deleted
+   production fallback, still living on in the test harness — harmless today since `buildTestConfig`
+   always sets `MAILGUN_AUTHSERV_ID`, but exactly the kind of dead code the critic flagged) now
+   mirrors `container.ts`'s real fallback (`mapping.ts`'s own hardcoded default) instead. No
+   dedicated test for doc/comment text; `pnpm test`'s full green run plus a manual re-grep for each
+   named stale string (all now absent) is the verification for a documentation-only item.
+
+**Not touched, and correctly out of scope for this pass:** F-D (the confirm-link founder fork,
+still open on the record), the `authentication-results`-mode residual (C′/N-10, both declared and
+gated on spike 3c), N-9 (the shared-`TEST_DATABASE_URL` concurrency footgun — QA-owned files per
+this pass's task boundary; observed directly during this pass as two flaky, non-reproducing
+`files_tenant_id_fkey` failures under concurrent `pnpm test` runs against the shared dev database,
+each of which passed cleanly in isolation, consistent with N-9's description rather than a
+regression in the code this pass touched).
+
+**Regenerated:** `docs/verification-ledger.md` (two new `@unverified-live` markers — Zoho's and
+Google's new `ensureFolder`, item 6 — 14 → 16 unverified-live, 0 verified-live, unchanged).
+**Lessons filed:** one, `docs/lessons.md` 2026-09-10 — `date_trunc('hour', timestamptz)` is
+STABLE, not IMMUTABLE, and cannot back an index/`ON CONFLICT` target without first pinning the
+time zone (`AT TIME ZONE 'UTC'`) to make the expression immutable; hit and fixed while building
+item 1's aggregate-row upsert, before any migration reached a live database.

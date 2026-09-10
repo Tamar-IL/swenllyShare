@@ -226,8 +226,9 @@ LIVE_MAILGUN=1 LIVE_MAILGUN_TEST_RECIPIENT=you@example.com \
 #   1. Set up a Mailgun Route: match_recipient("^cust-.*@<your-domain>$") -> forward to a
 #      URL you control (e.g. an ngrok tunnel to a local `pnpm dev` instance, or a real
 #      staging deploy's /webhooks/mailgun/inbound). Leave `INBOUND_REQUESTS_ENABLED=false`
-#      (the F-1 kill switch, default true — set it false here on purpose) pointed at that
-#      deployment until this spike confirms the field-name guess below: with it off, every
+#      (the F-1 kill switch — defaults `false`, so this is the shipping default, not a
+#      value you set specially for the spike) pointed at that deployment until this spike
+#      confirms the field-name guess below: with it off, every
 #      signature-verified webhook is quarantined (reason `inbound_disabled`) instead of
 #      being evaluated against a still-unconfirmed DMARC gate, so a live test message can't
 #      accidentally auto-share a file on a wrong guess while you're still capturing payloads.

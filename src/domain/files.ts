@@ -8,6 +8,7 @@ import type { DriveSharePort } from '../ports/drive-share.js';
 import type { BlobStagingPort } from '../ports/blob-staging.js';
 import type { TokenGen } from '../ports/token-gen.js';
 import type { Clock } from '../ports/clock.js';
+import type { Logger } from '../logger.js';
 import { AppError, ErrorCode } from '../lib/errors.js';
 import { limitStream, PayloadTooLargeError } from '../lib/byte-limit.js';
 import type { SettingsService } from './settings.js';
@@ -107,6 +108,9 @@ export class FilesService {
       blobStaging: BlobStagingPort;
       tokenGen: TokenGen;
       clock: Clock;
+      // Fix pass 7 (docs/reviews/critic-report.md Minor): injected via `container.ts` so
+      // this domain service never reaches for `console.log` (architecture.md §10).
+      logger: Logger;
     },
     private readonly config: { MAX_UPLOAD_BYTES: number; DEFAULT_EXPIRY_DAYS: number },
     private readonly settings: SettingsService,
@@ -164,6 +168,12 @@ export class FilesService {
       publicSlug,
       stagingBlobId: id,
       expiresAt,
+      // Fix pass 7 (critic-report.md Minor): the settings form's own choice behind
+      // `expiresAt` above (migration 0006) — every new file starts life in `days` mode
+      // at `DEFAULT_EXPIRY_DAYS`, matching the `resolveExpiry('days', ...)` call three
+      // lines up exactly.
+      expiryMode: 'days',
+      expiryDays: this.config.DEFAULT_EXPIRY_DAYS,
     });
 
     await jobs.enqueue(this.pool, {
@@ -235,7 +245,7 @@ export class FilesService {
     // this fix) clobbering `deleted` back to `failed`. Nothing is left to publish, so
     // this is a no-op that completes the job rather than a failure that retries it.
     if (file.status === 'deleted') {
-      console.log(`file.publish: file ${fileId} (tenant ${tenantId}) already deleted, no-op`);
+      this.ports.logger.info({ fileId, tenantId }, 'file.publish: file already deleted, no-op');
       return file;
     }
     if (!file.staging_blob_id) {
@@ -281,6 +291,7 @@ export class FilesService {
       if (!driveFileId) {
         const stream = await this.ports.blobStaging.open(file.staging_blob_id);
         const result = await this.ports.driveShare.uploadResumable(
+          tenantId,
           stream,
           Number(file.size_bytes),
           file.display_name,

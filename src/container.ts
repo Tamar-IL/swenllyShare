@@ -7,6 +7,7 @@ import type { OutboundMailPort } from './ports/outbound-mail.js';
 import type { BlobStagingPort } from './ports/blob-staging.js';
 import type { Clock } from './ports/clock.js';
 import type { TokenGen } from './ports/token-gen.js';
+import { createLogger, type Logger } from './logger.js';
 
 import { FakeFileStore } from './adapters/zoho/fake.js';
 import { ZohoFileStore } from './adapters/zoho/real.js';
@@ -53,6 +54,13 @@ export interface Services {
 export interface Container {
   config: Config;
   pool: Pool;
+  /**
+   * Fix pass 7 (docs/reviews/critic-report.md Minor): the one pino instance jobs and
+   * domain services log through (`src/logger.ts`) — `server.ts`/`worker.ts` build it and
+   * pass it straight through here (or, for tests/anywhere that doesn't, `buildContainer`
+   * builds one itself from `config.LOG_LEVEL` so `container.logger` always exists).
+   */
+  logger: Logger;
   ports: Ports;
   services: Services;
 }
@@ -105,6 +113,11 @@ function resolveMode(
 export interface BuildContainerOptions {
   config: Config;
   pool: Pool;
+  /** `server.ts`/`worker.ts` pass the logger they built (`createLogger`, `src/logger.ts`)
+   * so it's the exact same instance Fastify logs HTTP requests through. Optional so every
+   * existing call site (tests included) that never passed one keeps compiling — falls
+   * back to a freshly built logger at `config.LOG_LEVEL`. */
+  logger?: Logger;
   /** Test-only escape hatch: substitute a specific port instance (e.g. a `FakeClock` with
    * virtual time) after the normal ADAPTERS-driven construction. Never used by `server.ts`. */
   overrides?: Partial<Ports>;
@@ -117,7 +130,13 @@ export interface BuildContainerOptions {
  * one runtime invariant this file exists to enforce; get it wrong and a demo config could
  * ship live traffic through adapters that throw on every call.
  */
-export function buildContainer({ config, pool, overrides }: BuildContainerOptions): Container {
+export function buildContainer({
+  config,
+  pool,
+  logger,
+  overrides,
+}: BuildContainerOptions): Container {
+  const containerLogger = logger ?? createLogger(config.LOG_LEVEL);
   const adapterOverrides = parseAdapterOverrides(config.ADAPTER_OVERRIDES);
   const modes = {
     zoho: resolveMode(config.ADAPTERS, adapterOverrides, 'zoho'),
@@ -235,7 +254,7 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
     ),
     files: new FilesService(
       pool,
-      { fileStore, driveShare, blobStaging, tokenGen, clock },
+      { fileStore, driveShare, blobStaging, tokenGen, clock, logger: containerLogger },
       {
         MAX_UPLOAD_BYTES: config.MAX_UPLOAD_BYTES,
         DEFAULT_EXPIRY_DAYS: config.DEFAULT_EXPIRY_DAYS,
@@ -258,10 +277,10 @@ export function buildContainer({ config, pool, overrides }: BuildContainerOption
       DRIVE_SHARE_SOFT_CAP: config.DRIVE_SHARE_SOFT_CAP,
       SHARE_PACE_MIN_INTERVAL_MS: config.SHARE_PACE_MIN_INTERVAL_MS,
     }),
-    audit: new AuditService(pool),
+    audit: new AuditService(pool, rateLimit),
     rateLimit,
     health: new HealthService(pool),
   };
 
-  return { config, pool, ports, services };
+  return { config, pool, logger: containerLogger, ports, services };
 }

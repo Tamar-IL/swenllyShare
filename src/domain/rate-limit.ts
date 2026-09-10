@@ -120,4 +120,18 @@ export class RateLimitService {
 
     return exceeded;
   }
+
+  /**
+   * Fix pass 7 (critic N-2, "no way to resend"): a sender clicking "שלח שוב" is a
+   * separate write surface from the unauthenticated inbound webhook, but it is still a
+   * write that can be repeated arbitrarily fast from a signed-in session — bounded per
+   * file, reusing the SAME bucket shape (and the existing `RATE_FILE_PER_HOUR` ceiling)
+   * `checkInboundRequest`'s `file` bucket already uses, on a distinct key (`resend:` vs
+   * `file:`) so a burst of resends can't quietly consume the inbound path's own budget
+   * for that file, or vice versa.
+   */
+  async checkResend(fileId: string): Promise<boolean> {
+    const total = await rateLimits.incrementAndSum(this.pool, `resend:${fileId}`, WINDOW_MINUTES);
+    return total > this.config.RATE_FILE_PER_HOUR;
+  }
 }

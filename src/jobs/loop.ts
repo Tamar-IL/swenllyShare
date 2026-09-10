@@ -34,7 +34,7 @@ export function startWorkerLoop(container: Container): WorkerLoopHandle {
         // processNextJob only rejects for a truly unexpected error (e.g. the pool itself
         // is down) — every handler-level failure is already caught and turned into a
         // `jobs.fail()` call. Log and back off briefly rather than spinning hot.
-        console.error('worker loop: unexpected error claiming/processing a job', err);
+        container.logger.error({ err }, 'worker loop: unexpected error claiming/processing a job');
         didWork = false;
       }
       if (!didWork) {
@@ -57,7 +57,7 @@ export function startWorkerLoop(container: Container): WorkerLoopHandle {
       try {
         await ensureSweepsScheduled(container);
       } catch (err) {
-        console.error('worker loop: failed to schedule periodic sweeps', err);
+        container.logger.error({ err }, 'worker loop: failed to schedule periodic sweeps');
       }
       await container.ports.clock.sleep(SWEEP_CHECK_INTERVAL_MS);
     }

@@ -115,7 +115,13 @@ describe.skipIf(!hasTestDatabase())('RED TEAM — addressing, routing and replay
       limit: 1000,
     });
     // Expected: the rate gate caps how much an unauthenticated requester can write.
-    expect(rows.length).toBeLessThanOrEqual(5);
+    // Fix pass 7 (critic-report.md Minor, F-7): past the cap, one MORE row is allowed —
+    // the single aggregate `suppressed` row per (file, hour) that replaces pure silence
+    // (`deliveries.incrementSuppressed`) — but no more than that no matter how many
+    // over-cap requests arrive, so the bound is `cap + 1`, not unbounded.
+    expect(rows.length).toBeLessThanOrEqual(6);
+    const suppressedRows = rows.filter((r) => r.reason === 'suppressed');
+    expect(suppressedRows.length).toBeLessThanOrEqual(1);
   });
 
   // ---------------------------------------------------------------- RT-21

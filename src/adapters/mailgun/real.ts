@@ -115,7 +115,7 @@ export class MailgunOutboundAdapter implements OutboundMailPort {
     text: string;
     attachment?: OutboundAttachment;
     deliveryId?: string;
-  }): Promise<{ providerMessageId: string }> {
+  }): Promise<{ providerMessageId: string | null }> {
     const form = new FormData();
     form.set('from', this.config.outboundFrom);
     form.set('to', message.to);
@@ -166,9 +166,16 @@ export class MailgunOutboundAdapter implements OutboundMailPort {
     if (!res.ok) {
       throw classifyMailgunError(res.status, json);
     }
-    if (!json?.id) {
-      throw new PermanentError('Mailgun send response contained no message id');
-    }
-    return { providerMessageId: json.id };
+    // Second re-check, N-3 (docs/reviews/critic-report.md): a 2xx status IS Mailgun's
+    // acceptance of the message — this is a definite accept regardless of what happened
+    // reading or parsing the response body afterward. The old code threw `PermanentError`
+    // ("definite non-send") here whenever `res.text()` failed or the JSON carried no
+    // `id` field, which is the exact same "guess in the confident direction" mistake F-A
+    // fixed for the request side, pointed at the response side instead: Mailgun accepted
+    // the message and this code told the caller it definitely did not. `providerMessageId:
+    // null` is honest about not having Mailgun's own message id without downgrading a
+    // real acceptance into a fabricated failure — callers never persist or branch on this
+    // value (see `OutboundMailPort.send`'s doc comment), so `null` costs nothing.
+    return { providerMessageId: json?.id ?? null };
   }
 }

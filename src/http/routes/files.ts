@@ -11,6 +11,7 @@ import {
   STATUS_META,
   OUTCOME_META,
   mechanismLabel,
+  deliveryAddressLabel,
   formatHebrewDate,
   formatHebrewDateTime,
   formatByteCeiling,
@@ -26,6 +27,8 @@ const DMARC_NOTE =
 const FLASH_MESSAGES: Record<string, string> = {
   saved: 'ההגדרות נשמרו.',
   deleted: 'הקובץ נמחק.',
+  // Fix pass 7 (critic N-2, "no way to resend"): POST /files/:id/deliveries/:id/resend.
+  resent: 'הבקשה נשלחה שוב.',
 };
 
 interface SettingsBody {
@@ -131,7 +134,15 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
           uploadedAtLabel: formatHebrewDate(file.created_at),
           expiryMetaLabel: expiryMetaLabel(displayStatus, file.expires_at, now),
           customMessage: file.custom_message,
-          expiryMode: file.expires_at ? 'custom' : 'none',
+          // Fix pass 7 (critic-report.md Minor): pre-select the MODE the sender actually
+          // picked (migration 0006's `expiry_mode`/`expiry_days`), not a guess derived
+          // from whether `expires_at` happens to be set — the old `file.expires_at ?
+          // 'custom' : 'none'` meant an ordinary `days`-mode expiry (every file has one
+          // by default, `DEFAULT_EXPIRY_DAYS`) always rendered as "custom date", so the
+          // UX brief's default-state mock (the "30 days" radio pre-selected) was never
+          // actually shown.
+          expiryMode: file.expiry_mode,
+          expiryDays: file.expiry_days ?? container.config.DEFAULT_EXPIRY_DAYS,
           expiresAtIso: file.expires_at ? file.expires_at.toISOString().slice(0, 10) : null,
           allowlistMode: file.allowlist_mode,
           allowlist,
@@ -154,11 +165,19 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
         // cursor — see src/db/repositories/deliveries.ts listForFile()'s doc comment.
         deliverySinceId: deliveriesResult.items[0]?.id ?? '',
         deliveries: deliveriesResult.items.map((d) => ({
-          address: d.requester_address,
+          id: d.id,
+          address: deliveryAddressLabel(d),
           mechanismLabel: mechanismLabel(d.mechanism),
           pillClass: OUTCOME_META[d.outcome].pillClass,
           outcomeLabel: OUTCOME_META[d.outcome].label,
           atLabel: formatHebrewDateTime(d.created_at),
+          // Fix pass 7 (critic N-2, "no way to resend"): the "שלח שוב" button only makes
+          // sense on a delivery attempt that actually finalized as not-delivered — never
+          // `sent` (succeeded), `queued`/`sending`/`dispatching`/`granted` (still in
+          // flight), or `quarantined`/`rate_limited`/`expired`/`not_allowlisted` (policy
+          // blocks, not delivery attempts — this is also every outcome the aggregate
+          // `suppressed` row can ever have, so it never shows the button either).
+          canResend: d.outcome === 'failed' || d.outcome === 'unconfirmed',
         })),
       });
     },
@@ -224,6 +243,47 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
       );
       if (!deleted) return renderNotFound(reply);
       return reply.redirect('/files?flash=deleted');
+    },
+  );
+
+  /**
+   * Fix pass 7 (critic N-2, "no way to resend"): the "שלח שוב" button on a `failed`/
+   * `unconfirmed` deliveries-table row. Tenant-scoped (`AuditService.resendDelivery`
+   * looks the delivery up by `(tenantId, fileId, deliveryId)` together, so a cross-tenant
+   * or cross-file id 404s the same as every other lookup in this file, AC-A3) and rate-
+   * limited per file. Not a JSON action — a plain form POST + redirect, same shape as
+   * `/settings` and `/delete` above, so it works with no JS.
+   */
+  app.post<{ Params: { id: string; deliveryId: string } }>(
+    '/files/:id/deliveries/:deliveryId/resend',
+    { preValidation: app.csrfProtection, preHandler: requireSessionHtml },
+    async (request, reply) => {
+      if (!request.tenantId) return;
+      const result = await container.services.audit.resendDelivery(
+        request.tenantId,
+        request.params.id,
+        request.params.deliveryId,
+      );
+      switch (result.status) {
+        case 'ok':
+          return reply.redirect(`/files/${request.params.id}?flash=resent`);
+        case 'not_found':
+          return renderNotFound(reply);
+        case 'wrong_outcome':
+          reply.code(409);
+          return reply.view('error.eta', {
+            title: 'שגיאה',
+            message: 'ניתן לשלוח שוב רק בקשה שנכשלה או שלא אושרה.',
+            resendHref: `/files/${request.params.id}`,
+          });
+        case 'rate_limited':
+          reply.code(429);
+          return reply.view('error.eta', {
+            title: 'שגיאה',
+            message: 'יותר מדי בקשות לשליחה חוזרת עבור קובץ זה — נסה/י שוב בעוד כמה דקות.',
+            resendHref: `/files/${request.params.id}`,
+          });
+      }
     },
   );
 }

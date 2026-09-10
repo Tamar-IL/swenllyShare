@@ -45,6 +45,18 @@ describe('GoogleDriveShare (real adapter) — offline wire-shape tests', () => {
     const sizeBytes = CHUNK_SIZE_BYTES + 10;
     const content = Buffer.alloc(sizeBytes, 7);
 
+    // Fix pass 7 (critic-report.md #6): `uploadResumable` now resolves the tenant's own
+    // folder (creating it once, then caching it) before initiating the upload session —
+    // one extra POST to the plain (non-upload) Drive `files` endpoint.
+    let folderBody: unknown;
+    pool.intercept({ path: pathnameIs('/drive/v3/files'), method: 'POST' }).reply(async (opts) => {
+      const url = mockUrl(opts.path);
+      expect(url.searchParams.get('supportsAllDrives')).toBe('true');
+      expect(url.searchParams.get('driveId')).toBe('shared-drive-1');
+      folderBody = JSON.parse(await readMockBodyText(opts.body));
+      return { statusCode: 200, data: { id: 'tenant-folder-1' } };
+    });
+
     let initAuth: string | undefined;
     let initHeaders: Record<string, string> = {};
     let initBody: unknown;
@@ -87,6 +99,7 @@ describe('GoogleDriveShare (real adapter) — offline wire-shape tests', () => {
       });
 
     const result = await drive.uploadResumable(
+      'tenant-abc',
       Readable.from(content),
       sizeBytes,
       'big.bin',
@@ -94,13 +107,20 @@ describe('GoogleDriveShare (real adapter) — offline wire-shape tests', () => {
     );
 
     expect(result.driveFileId).toBe('drive-file-1');
+    expect(folderBody).toMatchObject({
+      name: 'tenant-abc',
+      mimeType: 'application/vnd.google-apps.folder',
+      parents: ['root-folder-1'],
+    });
     expect(initAuth).toBe('Bearer test-access-token');
     expect(initHeaders['x-upload-content-length']).toBe(String(sizeBytes));
     expect(initHeaders['x-upload-content-type']).toBe('application/octet-stream');
     expect(initBody).toMatchObject({
       name: 'big.bin',
       mimeType: 'application/octet-stream',
-      parents: ['root-folder-1'],
+      // The upload session's parent is now the TENANT's own folder (`tenant-folder-1`,
+      // from the mocked folder-create response above), not the raw configured root.
+      parents: ['tenant-folder-1'],
     });
     expect(contentRanges).toEqual([
       `bytes 0-${CHUNK_SIZE_BYTES - 1}/${sizeBytes}`,
