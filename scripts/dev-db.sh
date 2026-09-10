@@ -156,6 +156,12 @@ cmd_reset() {
 cmd_url() {
   echo "DATABASE_URL=postgres://postgres@${PGHOST}:${PGPORT}/${DEV_DB}"
   echo "TEST_DATABASE_URL=postgres://postgres@${PGHOST}:${PGPORT}/${TEST_DB}"
+  # N-9 (docs/reviews/critic-report.md): two concurrent `pnpm test` runs sharing the one
+  # ${TEST_DB} above will truncate/migrate out from under each other. Set TEST_DB_PER_RUN=1
+  # before running tests to have each invocation create (and drop, at the end of the run)
+  # its own private "${TEST_DB}_<pid>_<random>" database instead — see tests/setup/db.ts
+  # and scripts/README.md.
+  echo "# tip: two concurrent test runs? set TEST_DB_PER_RUN=1 to isolate them (see scripts/README.md)"
 }
 
 cmd_psql() {

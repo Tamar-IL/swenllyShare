@@ -22,3 +22,22 @@ Works as root (drops to the `postgres` OS user for `initdb`/server, since
 Postgres refuses root) or as a non-root owner of the data dir, including CI
 runners. Missing binaries print an `apt-get install postgresql-16` hint
 instead of installing anything.
+
+## Isolating concurrent test runs (`TEST_DB_PER_RUN`)
+
+`fileParallelism: false` (`vitest.config.ts`) only serializes test files _within_ one
+`vitest`/`pnpm test` invocation — nothing stops two concurrent invocations from sharing the
+one `swenlly_test` database above and truncating/migrating it out from under each other
+(docs/reviews/critic-report.md N-9). If you (or CI) ever run tests concurrently — a watch
+mode left open plus a manual run, a CI matrix pointed at one shared database, etc. — set:
+
+```
+TEST_DB_PER_RUN=1 pnpm test
+```
+
+before each invocation. `tests/setup/db.ts` then creates a private
+`swenlly_test_<pid>_<random>` database (via a connection to this server's `postgres`
+maintenance database), migrates it, and drops it again once that run finishes — two
+concurrent runs always land on two different databases with no extra coordination needed,
+since `process.pid` is real OS-process identity. Off by default: a plain `pnpm test` still
+uses the shared `swenlly_test` database exactly as before.

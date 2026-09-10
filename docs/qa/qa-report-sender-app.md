@@ -448,4 +448,25 @@ Screenshots and raw run logs: `/tmp/claude-0/qa-out/` (not committed — local e
 - `src/http/plugins/error-handler.ts` (`isClientAbortError`, new export)
 - `src/container.ts` (`AuthService` construction — `RATE_MAGICLINK_PER_HOUR`)
 - `tests/setup/http.ts` (`getCsrfToken` — optional `remoteAddress`)
+
+---
+
+## Browser harness (QA fix pass 7, 2026-09-10)
+
+Bug 7's "no automated test" gap above is closed: `tests/e2e/smoke.e2e.ts` (vitest project
+`e2e`, gated on `E2E=1` — see `vitest.config.ts` and `pnpm test:e2e`) is a real-Chromium
+(`playwright-core`, driven against `/opt/pw-browsers/chromium`), real-server (`tsx
+src/server.ts` as a child process, `ADAPTERS=fake`, `WORKER_ENABLED=true`,
+`BRANDED_PAGE_ENABLED=true`), real-Postgres smoke test that drives one full sender-app
+session end to end: sign-in via the fake magic link, the empty state, uploading a 1KB file,
+the status poll to ready, both artifact cards (mailto address carries the request token),
+the copy button's "הועתק" swap, a settings-save round trip, the deliveries table polling
+without duplicating a SQL-seeded row (the exact shape of Bug 1, now also covered from the
+browser side), and the branded page (`Swenlly` wordmark present, the raw Zoho public link
+never in the HTML). It specifically re-verifies Bug 7 itself: it reads
+`header.getBoundingClientRect().top` in-page and asserts it is exactly `0` — a regression to
+the pre-fix ~150px blank band would fail this test, not just look wrong in a screenshot.
+This does not replace visual review (no screenshots are taken or compared, so a paint-order/
+color regression that doesn't move layout would still slip through) but it does mean "is
+there a browser-shaped blank band above the header" is now a CI fact, not a claim.
 - `tests/unit/error-handler.test.ts` (new)

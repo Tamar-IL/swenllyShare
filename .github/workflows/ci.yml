@@ -94,3 +94,56 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  e2e:
+    name: e2e (real browser)
+    runs-on: ubuntu-latest
+    # Independent of the `ci` job — same install/Postgres shape, but this is the one job
+    # that also needs a real Chromium, so it's kept separate rather than adding browser
+    # install time to every push's critical path.
+    env:
+      SWENLLY_PGDATA: ${{ github.workspace }}/.pgdata
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium (playwright-core)
+        run: pnpm exec playwright-core install --with-deps chromium
+
+      - name: Ensure PostgreSQL 16 server binaries are present
+        run: |
+          if [ ! -x /usr/lib/postgresql/16/bin/initdb ]; then
+            echo "PostgreSQL 16 server not found — installing (client tools are preinstalled on this runner, the server package is not)."
+            sudo apt-get update
+            sudo apt-get install -y postgresql-16
+          else
+            echo "PostgreSQL 16 server already present."
+          fi
+
+      - name: Start Postgres 16 (scripts/dev-db.sh)
+        run: scripts/dev-db.sh start
+
+      - name: E2E smoke test (real Chromium, real server, real Postgres)
+        run: pnpm test:e2e
+        env:
+          # tests/e2e/smoke.e2e.ts (via tests/setup/db.ts) needs this to find/migrate the
+          # test database; scripts/dev-db.sh's fixed test URL (see `scripts/dev-db.sh url`).
+          TEST_DATABASE_URL: postgres://postgres@127.0.0.1:54329/swenlly_test
+
+      - name: Stop Postgres 16
+        if: always()
+        run: scripts/dev-db.sh stop

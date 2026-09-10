@@ -93,6 +93,17 @@ CI (`.github/workflows/ci.yml`) runs typecheck → lint → prettier check → u
    match the sending domain's actual signing key or every inbound request is rejected.
 6. **Single stateful node.** No horizontal scaling until staging moves off local disk — see
    "Platform shape" above.
+6a. **Memory floor (critic report Minor: "attachment delivery buffers the whole file in
+   memory").** `streamToBuffer` (the attachment-delivery path) buffers a full attachment up
+   to `ATTACH_LIMIT_BYTES` before sending it, and up to `WORKER_CONCURRENCY` deliveries can
+   be doing that at once — so the worker's own burst ceiling is
+   `ATTACH_LIMIT_BYTES × WORKER_CONCURRENCY` (defaults: 20MB × 4 = **80MB**), on top of the
+   Node/Fastify process's own baseline (~100–150MB RSS idle, before this product's own
+   pools/caches). Size the container to comfortably clear baseline + burst with headroom for
+   GC overhead and a traffic spike that lines up several large attachments at once — **at
+   least 512MB** at the defaults above, and re-derive this number (baseline + `ATTACH_LIMIT_
+   BYTES × WORKER_CONCURRENCY`, times ~1.5–2x headroom) before raising either config value in
+   production. This is a memory-sizing note, not a fix — the buffering itself is unchanged.
 7. **Health endpoints:** `GET /healthz` (process alive) and `GET /readyz` (`{ok, db,
    pendingJobs}` — DB reachable) — point your platform's liveness/readiness probes at these
    respectively; the `Dockerfile`'s `HEALTHCHECK` uses `/healthz`.
