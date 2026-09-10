@@ -13,7 +13,11 @@ export type ResendResult =
   | { status: 'ok'; deliveryId: string }
   | { status: 'not_found' }
   | { status: 'wrong_outcome' }
-  | { status: 'rate_limited' };
+  | { status: 'rate_limited' }
+  // Fix pass 9 (critic-report.md R-2): a resend-originated delivery for this
+  // (file, requester) is already `queued`/`sending`/`dispatching`/`granted` —
+  // the double-click / rapid-click case.
+  | { status: 'in_flight' };
 
 /**
  * The per-file deliveries feed (AC-A2, `GET /api/files/:id/deliveries`). Every terminal
@@ -55,6 +59,20 @@ export class AuditService {
    * transaction — the same append-then-complete outbox shape the inbound pipeline's own
    * gate 10 uses (architecture.md §3 invariant 4, `RequestPipeline.handleWebhook`), so a
    * crash between the insert and the enqueue is impossible, not just unlikely.
+   *
+   * Fix pass 9 (critic-report.md R-2), two additions, in order:
+   *
+   * 1. Rate gates: `RateLimitService.checkResend` now runs the SAME shared
+   *    requester/domain/file/tenant check a genuine inbound request for this address
+   *    would (`checkInboundRequest`), plus its own resend-specific bucket — not the
+   *    single per-file bucket fix pass 7 shipped, which let one address be mailed far
+   *    past `RATE_REQUESTER_PER_HOUR`. Exceeded writes a `rate_limited` audit row
+   *    (reason `resend`) the same shape the inbound pipeline's own rate gate writes, so
+   *    the sender's audit trail shows resend throttling exactly like inbound throttling.
+   * 2. In-flight guard: `insertQueuedIfNotInFlight` refuses (returns `undefined`) when a
+   *    resend for this exact `(file, requester)` is already non-terminal, atomically via
+   *    migration 0008's partial unique index — never a read-then-insert, so N concurrent
+   *    clicks can create at most one new delivery, however many arrive at once.
    */
   async resendDelivery(
     tenantId: string,
@@ -71,31 +89,44 @@ export class AuditService {
     if (original.outcome !== 'failed' && original.outcome !== 'unconfirmed') {
       return { status: 'wrong_outcome' };
     }
+    const requesterAddress = original.requester_address;
 
-    const limited = await this.rateLimit.checkResend(fileId);
-    if (limited) return { status: 'rate_limited' };
-
-    const newDeliveryId = await withTransaction(this.pool, async (client) => {
-      const delivery = await deliveries.insertQueued(client, {
+    const limited = await this.rateLimit.checkResend({ requesterAddress, fileId, tenantId });
+    if (limited) {
+      await deliveries.insertTerminal(this.pool, {
         tenantId,
         fileId,
-        requesterAddress: original.requester_address!,
+        requesterAddress,
+        outcome: 'rate_limited',
+        reason: 'resend',
+        dmarc: original.dmarc,
+      });
+      return { status: 'rate_limited' };
+    }
+
+    const newDeliveryId = await withTransaction(this.pool, async (client) => {
+      const delivery = await deliveries.insertQueuedIfNotInFlight(client, {
+        tenantId,
+        fileId,
+        requesterAddress,
         dmarc: original.dmarc,
         reason: `resend_of:${original.id}`,
       });
+      if (!delivery) return undefined;
       await jobs.enqueue(client, {
         kind: 'delivery.fulfill',
         payload: {
           tenantId,
           fileId,
           deliveryId: delivery.id,
-          requesterAddress: original.requester_address,
+          requesterAddress,
         },
         dedupeKey: `delivery.fulfill:resend:${delivery.id}`,
       });
       return delivery.id;
     });
 
+    if (!newDeliveryId) return { status: 'in_flight' };
     return { status: 'ok', deliveryId: newDeliveryId };
   }
 }

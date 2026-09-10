@@ -40,3 +40,8 @@ Three lines per chunk, newest last. Live external calls made so far: **0**.
 - N-5 (RFC 8601 parsing) and N-6 (domain cross-check) closed and adversarially re-probed; N-7 docs drift closed; N-10 (one-directional cross-check) documented as residual, not tightened.
 - Final suite: 356 tests green + 7 live-gated skips; zero `it.fails`; ledger 0 verified-live / 14 unverified-live. Live external calls made by anyone on this project: **0**.
 - Next: the founder runs `docs/runbooks/live-spikes.md` (Zoho, Google, Mailgun 3a–3c, whitelisting) and answers the open forks in README → Open questions.
+
+## 2026-09-10 — Polish pass (fix passes 7–9) → green
+- Closed every carried Minor/N-* item: quarantine suppression rows, null requester on unparseable From, pino logger everywhere, N-3, expiry-mode fidelity + 0007 backfill, per-tenant folders persisted under a lock, resend action (same rate gates as inbound + race-safe in-flight guard, 0008), N-8, browser e2e smoke in CI, per-run isolated test DB, CI ledger check now blocking.
+- Code review + critic fourth pass on the polish diff: 4 review findings and R-1/R-2 fixed the same day.
+- Suite: 388 tests + 1 e2e green, 7 live-gated skips; ledger 0 verified-live / 18 unverified-live. Live external calls: **0**.

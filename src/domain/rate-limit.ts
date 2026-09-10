@@ -122,16 +122,40 @@ export class RateLimitService {
   }
 
   /**
-   * Fix pass 7 (critic N-2, "no way to resend"): a sender clicking "שלח שוב" is a
-   * separate write surface from the unauthenticated inbound webhook, but it is still a
-   * write that can be repeated arbitrarily fast from a signed-in session — bounded per
-   * file, reusing the SAME bucket shape (and the existing `RATE_FILE_PER_HOUR` ceiling)
-   * `checkInboundRequest`'s `file` bucket already uses, on a distinct key (`resend:` vs
-   * `file:`) so a burst of resends can't quietly consume the inbound path's own budget
-   * for that file, or vice versa.
+   * Fix pass 9 (critic-report.md R-2): fix pass 7's `checkResend` consulted exactly ONE
+   * bucket, `resend:<fileId>` at `RATE_FILE_PER_HOUR` (60 by default) — never the
+   * `requester`, `domain`, or `tenant` buckets at all. A signed-in sender could click
+   * "שלח שוב" on one row up to 60 times an hour and mail ONE address 60 times, 12× the
+   * per-recipient ceiling (`RATE_REQUESTER_PER_HOUR`, default 5) that exists for exactly
+   * one reason: no single address gets bombed. A resend is, to the recipient, just
+   * another message about this file — it must clear the SAME gates a genuine inbound
+   * request for that address would, so it calls `checkInboundRequest` itself (one
+   * shared function, not a re-implementation that can drift from it) rather than a
+   * private copy of the requester/domain/file/tenant logic.
+   *
+   * On top of those four shared buckets, ONE resend-specific bucket remains —
+   * `resend:<fileId>:<requesterKey>` at `RATE_REQUESTER_PER_HOUR` — scoped to the
+   * (file, requester) pair, not the file alone, so it bounds the SAME identity the
+   * shared `requester` bucket protects instead of the identity (the file) that let 60
+   * mails through last time. It exists in addition to, not instead of, the shared
+   * checks: `checkInboundRequest`'s own `file` bucket is process-wide per file (shared
+   * with genuine inbound traffic against that file), so without this a sender could
+   * still spread resends thinly across many DIFFERENT requester addresses on one file
+   * and never trip any single requester's own cap while still hammering one file's
+   * resend surface far harder than any one inbound requester ever could.
    */
-  async checkResend(fileId: string): Promise<boolean> {
-    const total = await rateLimits.incrementAndSum(this.pool, `resend:${fileId}`, WINDOW_MINUTES);
-    return total > this.config.RATE_FILE_PER_HOUR;
+  async checkResend(identifiers: {
+    requesterAddress: string;
+    fileId: string;
+    tenantId: string;
+  }): Promise<boolean> {
+    const exceeded = await this.checkInboundRequest(identifiers);
+    const requesterKey = normalizeRequesterBucketKey(identifiers.requesterAddress);
+    const resendTotal = await rateLimits.incrementAndSum(
+      this.pool,
+      `resend:${identifiers.fileId}:${requesterKey}`,
+      WINDOW_MINUTES,
+    );
+    return exceeded.length > 0 || resendTotal > this.config.RATE_REQUESTER_PER_HOUR;
   }
 }

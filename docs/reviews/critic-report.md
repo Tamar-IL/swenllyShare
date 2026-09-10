@@ -1642,6 +1642,49 @@ sliced. The reasoning in the current doc comment ("a distinct key so the two bud
 into each other") is sound about *isolation* and silent about *who the cap protects* — that is the
 mistake.
 
+**Fix-status note (fix pass 9).** Both halves fixed, in the order this finding gave them less its
+first, cheaper-to-verify item:
+
+- **In-flight guard.** `AuditService.resendDelivery` now calls a new
+  `deliveries.insertQueuedIfNotInFlight` instead of the old unconditional `insertQueued` —
+  `INSERT ... ON CONFLICT (file_id, requester_address) WHERE reason LIKE 'resend_of:%' AND outcome
+  IN ('queued','sending','dispatching','granted') DO NOTHING RETURNING *` against a new partial
+  unique index, migration `0008_resend_in_flight_guard.sql`. No row back maps to a new
+  `ResendResult` case, `'in_flight'`, which the route answers `409`. This is the insert deciding
+  the race, not a read-then-insert check racing itself: 12 concurrent clicks on one `failed` row
+  now produce exactly one `302` (and 11 `409`s), one new `deliveries` row, and one mail —
+  `tests/review/resend-delivery.test.ts`, "12 concurrent resend clicks ... create exactly one new
+  delivery and send exactly one mail". Scoped to `reason LIKE 'resend_of:%'` specifically so the
+  ordinary inbound pipeline — which creates a fresh `queued` row per genuine request with no such
+  guard, on purpose, and never has — is untouched; pinned by "the resend in-flight guard does not
+  change the inbound pipeline's own (unrelated) duplicate-request behavior" in the same file, two
+  genuine webhook deliveries from one requester while the first is still `queued` still both land.
+- **Rate gates.** `RateLimitService.checkResend` no longer consults only `resend:<fileId>` at
+  `RATE_FILE_PER_HOUR`. It now calls `checkInboundRequest` — the exact function the inbound webhook
+  path itself calls — so a resend clears the same `requester`/`domain`/`file`/`tenant` gates a
+  genuine inbound request for that address would (closing the specific gap this finding named: the
+  `tenant` bucket was never touched at all), plus one resend-specific bucket,
+  `resend:<fileId>:<requesterAddress>` at `RATE_REQUESTER_PER_HOUR` exactly as suggested — keyed on
+  the identity that suffers the harm, not the file. Exceeding either writes a `rate_limited` audit
+  row with `reason: 'resend'`, same shape the inbound pipeline's own rate gate already writes. Since
+  the shared `requester` bucket is keyed on the (normalized) address alone, not per file, it is
+  provably shared across a sender's files, not per-file re-issued budget — proven by "resends to two
+  different files by the same requester share the shared per-requester bucket" (3 allowed total
+  across two files at `RATE_REQUESTER_PER_HOUR: 3`, the 4th `429` regardless of which file it hits)
+  and "a 6th resend to the same requester within the hour is rate_limited (429) and writes an audit
+  row" (5 through at the default `RATE_REQUESTER_PER_HOUR: 5`, the 6th `429` with the audit row
+  present). The reproduction this finding gave (60 mails to one address in an hour) is no longer
+  reachable: the shared `requester` bucket caps that address at 5 exactly as it always capped
+  genuine inbound traffic to it.
+
+Not done, and not claimed: the two rate-gate tests above run resends sequentially (draining each
+resend's job before the next click) specifically so the in-flight guard and the rate gate can each
+be verified in isolation — no test here exercises the interaction between a rate-gate rejection and
+a concurrent in-flight collision on the exact same request, though nothing in the implementation
+gives that combination a code path either check doesn't already own on its own. `pnpm typecheck &&
+pnpm lint && pnpm exec prettier --check . && pnpm test && pnpm gen:ledger -- --check` all green,
+388 passed / 7 skipped (four new), zero `it.fails`.
+
 ### R-3 (minor) — `ensureFolder` has no cross-restart identity and no create-race guard, in both adapters
 
 Independently filed by the concurrent code review as its finding 2 [MEDIUM-HIGH]; we converged

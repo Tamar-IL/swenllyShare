@@ -22,6 +22,7 @@ describe.skipIf(!hasTestDatabase())('migrate (idempotency)', () => {
       '0005_file_expiry_error.sql',
       '0006_quarantine_suppression_and_expiry_mode.sql',
       '0007_expiry_mode_backfill_and_tenant_folders.sql',
+      '0008_resend_in_flight_guard.sql',
     ]);
   });
 

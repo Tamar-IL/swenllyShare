@@ -119,6 +119,49 @@ export const deliveries = {
     return row;
   },
 
+  /**
+   * Fix pass 9 (critic-report.md R-2): the race-safe counterpart to `insertQueued` used
+   * ONLY by `AuditService.resendDelivery` — refuses (returns `undefined`, never throws)
+   * when a resend-originated delivery for the same `(file_id, requester_address)` is
+   * already in flight (`queued`/`sending`/`dispatching`/`granted`), via the migration
+   * 0008 partial unique index scoped to `reason LIKE 'resend_of:%'`. The conflict is
+   * detected by the INSERT itself (`ON CONFLICT ... DO NOTHING`) against that index, not
+   * a separate SELECT-then-INSERT check racing its own read: two concurrent resend
+   * clicks both attempt this INSERT, and Postgres's own row lock on the index entry
+   * ensures only one of them ever gets a row back, however many arrive at once. Callers
+   * must always pass a `reason` matching that pattern (`resend_of:<originalDeliveryId>`)
+   * — this is not a general-purpose insert, and does not touch `insertQueued`'s own
+   * behavior (the ordinary inbound pipeline) at all, since that path never sets `reason`
+   * on a `queued` row.
+   */
+  async insertQueuedIfNotInFlight(
+    db: Queryable,
+    params: {
+      tenantId: string;
+      fileId: string;
+      requesterAddress: string;
+      dmarc?: string | null;
+      reason: string;
+    },
+  ): Promise<DeliveryRow | undefined> {
+    const { rows } = await db.query<DeliveryRow>(
+      `INSERT INTO deliveries (tenant_id, file_id, requester_address, dmarc, outcome, reason)
+       VALUES ($1, $2, $3, $4, 'queued', $5)
+       ON CONFLICT (file_id, requester_address)
+         WHERE reason LIKE 'resend_of:%' AND outcome IN ('queued', 'sending', 'dispatching', 'granted')
+       DO NOTHING
+       RETURNING *`,
+      [
+        params.tenantId,
+        params.fileId,
+        params.requesterAddress,
+        params.dmarc ?? null,
+        params.reason,
+      ],
+    );
+    return rows[0];
+  },
+
   /** `delivery.fulfill` resolving a queued row to its final outcome. */
   async complete(
     db: Queryable,

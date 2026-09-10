@@ -283,6 +283,13 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
             message: 'ניתן לשלוח שוב רק בקשה שנכשלה או שלא אושרה.',
             resendHref: `/files/${request.params.id}`,
           });
+        case 'in_flight':
+          reply.code(409);
+          return reply.view('error.eta', {
+            title: 'שגיאה',
+            message: 'כבר קיימת שליחה חוזרת בתהליך עבור כתובת זו — יש להמתין לסיומה.',
+            resendHref: `/files/${request.params.id}`,
+          });
         case 'rate_limited':
           reply.code(429);
           return reply.view('error.eta', {

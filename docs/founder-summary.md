@@ -1,7 +1,7 @@
 # Founder Summary — Swenlly System 2 build (2026-09-08)
 
 **Verdict of the final gate (critic, third re-check): SHIP-READY-FOR-LIVE-SPIKES.**
-Branch: `claude/swenlly-system-2-file-sharing-32nrdu` · 31 commits · 356 tests green on real
+Branch: `claude/swenlly-system-2-file-sharing-32nrdu` · 38 commits · 388 tests + 1 browser e2e green on real
 Postgres · 7 tests skip until live credentials exist · **0 live calls to Zoho, Google or Mailgun
 have been made by anyone on this project** (`docs/verification-ledger.md`).
 
@@ -18,9 +18,15 @@ requests). The Swenlly-branded page exists behind `BRANDED_PAGE_ENABLED` (defaul
 downloads so the Zoho URL is never visible, and renders without an iframe until Zoho returns a
 real embed token. Hebrew-first RTL UI, browser-verified. CI runs the whole suite on real Postgres.
 
+## Polish pass (2026-09-10)
+Every Minor/N-* item from the reviews is closed: quarantine suppression rows, redacting logger
+everywhere, expiry-mode fidelity + backfill, per-tenant folders persisted across restarts, a
+rate-limited, in-flight-guarded resend action, a browser e2e smoke test in CI, per-run isolated
+test databases, and a CI ledger check that now fails the build. Suite: 388 + 1 e2e.
+
 ## What is proven vs. not
 Proven: every PRD acceptance criterion has a test that exercises it against semantic fakes
-(architecture.md §13, critic per-AC table). Not proven: every provider call. All 14 real adapter
+(architecture.md §13, critic per-AC table). Not proven: every provider call. All 18 real adapter
 methods are `@unverified-live`; the runbook `docs/runbooks/live-spikes.md` turns each of the
 kickoff brief's four P0 spikes into a step-by-step check that flips the ledger.
 
