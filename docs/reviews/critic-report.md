@@ -1840,3 +1840,329 @@ are still four spikes with a runbook. The addition: now that each tenant gets it
 spikes should also answer what these providers do when we ask for a folder whose name already
 exists, because the code assumes it can create one per tenant and currently forgets which one it
 made every time the process restarts.
+
+---
+
+# Fifth pass verdict — Critic, 2026-09-10 — against HEAD `d6031ac`
+
+**Scope, as tasked:** re-run my own R-1 and R-2 reproductions against HEAD; verify the in-flight
+guard is a database constraint rather than a read-then-insert; verify tenant folder ids persist and
+survive a restart; verify CI's ledger step no longer carries `continue-on-error`; verify the
+founder-facing counts match reality. Everything else in the per-AC table is **carried forward from
+the fourth pass, not re-probed**, except AC-U4, which fix passes 8 and 9 touched directly and which
+I re-probed end to end.
+
+**Method:** `pnpm test` against real Postgres (388 passed / 7 live-gated skips / 69 files, zero
+failures — matches the claim exactly). Built a **throwaway database at the genuine pre-0007 state**
+(`critic_p1`: applied `0001`–`0006` only, by hand, seeded four rows, then applied `0007`) rather
+than simulating the state on an already-migrated database. Wrote eight throwaway runtime probes
+(CP-1..CP-8) covering the backfill's end-to-end consequence, 60 sequential resends at the DEFAULT
+config, 12 concurrent clicks, cross-file resends by one requester, a simulated process restart's
+folder resolution, the `days`-mode settings round-trip, unbounded audit growth, and non-UUID path
+ids. Read migrations `0007`/`0008`, `RateLimitService`, `AuditService.resendDelivery`,
+`deliveries.insertQueuedIfNotInFlight`, `FilesService.resolveTenantFolder`, both real adapters'
+`ensureFolder`/`resolveFolder`, and `queue.ts`'s dead-letter hook. All probes and the throwaway
+database deleted; `src/**` untouched; nothing committed; working tree clean.
+
+### Verdict: **SHIP-READY-FOR-LIVE-SPIKES**
+
+R-1 and R-2 are genuinely, verifiably closed — not papered over, and closed with the right
+mechanisms (a follow-up migration with a guarded `UPDATE`; a real partial *unique* index that makes
+the database decide the race). The three minors I named are closed too. The live spikes are
+credentialed probes of Zoho/Drive/Mailgun and nothing I found this pass touches that path, so the
+gate they are waiting on is open.
+
+But I did find one **new serious defect (N-11)**, and it is in the same class as R-1 and hits the
+same acceptance criterion: **renaming a file silently extends its expiry.** It is pre-existing, not
+a regression of these fix passes, and it affects *every* file rather than only pre-migration ones —
+because `days` is the mode every new file is created in. It does not block the spikes; it must be
+fixed before a customer's hand is on the settings form.
+
+---
+
+### R-1 — **CLOSED, verified on a genuine pre-0007 database**
+
+I did not trust an already-migrated database for this. I created `critic_p1`, applied migrations
+`0001`–`0006` and nothing else, seeded the four row shapes that matter, then applied `0007`:
+
+```
+--- before 0007 ---                       --- after 0007 ---
+A|ready   |2026-10-10|none|               A|ready   |2026-10-10|custom|      <- backfilled, date intact
+B|ready   |          |none|               B|ready   |          |none|        <- honestly 'none', untouched
+C|ready   |2026-11-01|days|30             C|ready   |2026-11-01|days|30      <- post-0006 row, untouched
+D|expired |2026-01-01|none|               D|expired |2026-01-01|custom|      <- harmless
+self-contradictory rows remaining: 0
+```
+
+Every property I asked for holds: the exact stored date is preserved (`'custom'` is a pass-through,
+never re-derived), the `AND expiry_mode = 'none'` guard leaves an already-edited post-0006 row
+alone, and a genuinely no-expiry row is not invented an expiry. **Zero** rows remain in the
+self-contradictory `expires_at IS NOT NULL AND expiry_mode = 'none'` state that was the whole
+finding.
+
+The end-to-end consequence is closed too (probe CP-1, on a row in exactly the backfilled state):
+
+```
+CP-1 radios: custom=true  none=false        (the page no longer lies about the file)
+CP-1 save status=302 -> expires_at = 2026-10-10T00:00:00.000Z, mode=custom   (was: null)
+```
+
+The fourth pass's reproduction — *"save the form for any other reason, expiry becomes `NULL`"* — no
+longer reproduces. One honest sub-note, below the bar for a finding: the `custom` field is
+date-granularity, so a save round-trips a `12:00Z` expiry down to `00:00Z`. That is ≤24h in the
+**stricter** direction, which `docs/research/03` permits, and it is a property of the date input,
+not of the backfill.
+
+### R-2 — **CLOSED, both halves, verified independently**
+
+**The in-flight guard is a database constraint, not a read-then-insert.** Confirmed directly
+against Postgres:
+
+```
+SELECT indisunique FROM pg_index ... WHERE relname='deliveries_resend_in_flight_idx';  -> t
+CREATE UNIQUE INDEX deliveries_resend_in_flight_idx ON public.deliveries USING btree
+  (file_id, requester_address)
+  WHERE ((reason ~~ 'resend_of:%') AND (outcome = ANY (ARRAY['queued','sending','dispatching','granted'])))
+```
+
+`deliveries.insertQueuedIfNotInFlight` is a single `INSERT ... ON CONFLICT (file_id,
+requester_address) WHERE <that exact predicate> DO NOTHING RETURNING *` — there is no `SELECT`
+before it and no application-side decision in the race. My own independent 12-concurrent-click
+probe (CP-3), fired as one `Promise.all` so all twelve are genuinely in flight together:
+
+```
+CP-3 codes = [302,409,409,409,409,409,409,409,409,409,409,409]
+CP-3 deliveries rows = 2 (original + exactly one resend)   mails = 1
+```
+
+I also checked the guard *releases*: `sent`/`failed`/`unconfirmed` all fall outside the index
+predicate, `granted` is genuinely non-terminal (migration `0004`) and correctly inside it, and a
+resend job that exhausts `JOB_MAX_ATTEMPTS` is driven to `failed` by `runDeadLetterHook`
+(`src/jobs/queue.ts`) — so a dead job cannot leave a `(file, requester)` pair permanently
+un-resendable. That was the failure mode I most expected from a guard of this shape, and it is
+handled.
+
+**The amplification is gone.** The fourth pass's exact reproduction, re-run at the **default**
+config (probe CP-2, 60 sequential clicks, each one's job drained so the in-flight guard cannot mask
+the rate gate):
+
+```
+CP-2 caps: {requester:5, file:60, tenant:300, domain:30}
+CP-2 accepted=5  rate_limited(429)=55  in_flight(409)=0
+CP-2 MAILS TO ONE ADDRESS = 5     (was: 60)
+```
+
+Five, not sixty — the shared per-recipient ceiling, exactly the identity the cap exists to protect.
+And the bucket is genuinely shared across a sender's files, which was the other half of the
+finding (probe CP-4, one requester, two files, alternating clicks at the default config):
+
+```
+CP-4 codes = [302,302,302,302,302,429,429,429,429,429,429,429]
+CP-4 mails to one address across two files = 5
+```
+
+`checkResend` delegating to `checkInboundRequest` — the same function the webhook path calls — is
+the right shape: one implementation, so the two paths cannot drift apart, and the `tenant` bucket
+(never consulted at all before) is now in the path. I looked for a way around it and did not find
+one: the `requester` bucket key is the F-8-normalized address, so `+tag` and Gmail-dot variants of
+one recipient share the cap, and a second `failed` row for the same pair collides on the same
+index and the same bucket.
+
+### Minors from the fourth pass — all three closed
+
+- **R-3, folder identity across restarts — CLOSED, and better than I asked for.** I asked for
+  persistence; the fix shipped persistence **plus** lookup-by-name **plus** an advisory lock —
+  three independent defences. Probe CP-5 simulates a restart (a brand-new container, therefore
+  brand-new adapters with empty caches) and publishes a second file for the same tenant:
+
+  ```
+  CP-5 persisted after first publish:  zoho=zoho-folder-20  drive=drive-folder-1
+  CP-5 after restart-publish:          zoho=zoho-folder-20  drive=drive-folder-1
+  CP-5 restarted process's folder map: [[<tenantId>, "zoho-folder-20"]] / [[<tenantId>, "drive-folder-1"]]
+  ```
+
+  No fresh id was minted; the restarted process primed its cache from `tenants.zoho_folder_id` /
+  `drive_folder_id`. I also traced every call site of `ensureFolder` to confirm none of them can
+  reach the adapter unprimed — `SharingEngine.provision` uses `driveShare.copy`, which never
+  touches a folder, and `uploadResumable`'s internal `ensureFolder` is always preceded by
+  `resolveTenantFolder`. Both real adapters now `findFolderByName` before creating, so even a wiped
+  `tenants` row adopts the existing folder rather than forking storage.
+- **CI ledger check — CLOSED.** `continue-on-error` is gone from the entire workflow file; the only
+  surviving occurrence of the string is inside a comment. I re-verified the generator has real
+  teeth (`pnpm gen:ledger -- --check` → exit 0 on a clean tree; the fourth pass proved it exits 1
+  on drift), so the README's and the ledger's own claim that CI enforces this is now true.
+- **Stale counts — CLOSED.** Every founder-facing number matches what I measured:
+  `README.md:18` "388 tests pass (+1 browser e2e)"; `docs/founder-summary.md:4` "38 commits · 388
+  tests + 1 browser e2e" (`git rev-list --count HEAD` = **38**); `docs/progress.md:47` "388 tests +
+  1 e2e green, 7 live-gated skips; ledger 0 verified-live / **18** unverified-live";
+  `docs/verification-ledger.md:5` "0 verified-live, **18** unverified-live". `pnpm test` reported
+  **388 passed | 7 skipped**. Four documents, four independent claims, all true.
+
+---
+
+### N-11 (serious; **new this pass**; pre-existing, not a regression of fix pass 8/9) — renaming a file silently **extends** its expiry
+
+`SettingsService.resolveExpiry('days', ...)` returns `clock.now() + days` — recomputed from *now*,
+never anchored to the file's creation. `updateSettings` recomputes it on every save where
+`expiryMode` is present, and `src/views/file-detail.eta:151-152` pre-fills the `days` radio and the
+day count from the persisted row, so the settings form **always** submits them. Every file is
+created in `days` mode (`createStaged` seeds `DEFAULT_EXPIRY_DAYS`), so this is not an edge case —
+it is the default path for every file in the product.
+
+Reproduced (probe CP-6: one file, 25 days of virtual time pass, then the sender renames it and
+changes nothing else, submitting exactly what the page pre-filled):
+
+```
+CP-6 at creation:         mode=days days=30  expires_at = Sat Oct 10 2026
+CP-6 page pre-fills:      daysRadioChecked=true  expiryDays=30
+CP-6 save status=302
+CP-6 expires_at AFTER rename = Wed Nov 04 2026
+CP-6 expiry moved by 25 DAYS (positive = file lives LONGER)
+```
+
+A file with five days left now has thirty. The sender did not touch the expiry control, was shown
+no expiry *date* anywhere on the page (the template renders only the day count, never the resulting
+date, so there is no visual signal that anything moved), and no record was written. This is a
+consent/safety invariant moving in the **looser** direction with no user intent — the identical
+harm R-1 described, arrived at by extension rather than deletion, and `docs/research/03` forbids it
+in the same words.
+
+Severity relative to R-1: lower, because the file still expires — the harm is bounded by the file's
+own age rather than being unbounded permanence. Higher in reach: R-1 could only fire on rows
+predating migration `0006`; this fires on every file in every database, forever. There is a sharp
+irony worth naming: because the R-1 backfill wrote `'custom'`, and `'custom'` is a pure
+pass-through, **files old enough to have been backfilled are now safer against this than files
+created today.**
+
+**Do this.** Only recompute `expires_at` when the sender actually changed something about the
+expiry — if `input.expiryMode === 'days'` and `input.expiryDays === file.expiry_days` and the file
+already has an `expires_at`, keep the stored timestamp untouched. (Anchoring on a stored
+`expiry_anchor` column is the more general fix, but it needs a migration and a backfill for a
+property the two existing columns already determine; the equality check is smaller and reversible.)
+Pin it with a test that advances the clock, saves the form with only `displayName` changed, and
+asserts `expires_at` is byte-identical. And render the resulting date next to the day count, so the
+control cannot change a value the page never showed.
+
+### N-12 (minor; new) — a rate-limited resend writes one unbounded `deliveries` row per click
+
+`AuditService.resendDelivery` writes a `rate_limited` audit row on every refused click, with no
+aggregation. Probe CP-7, 200 clicks against a cap of 1:
+
+```
+CP-7 200 clicks at cap 1 -> deliveries rows = 201, rate_limited rows = 199
+```
+
+At the default config, CP-2's 60 clicks produced 61 rows of which 55 were `rate_limited` noise.
+This is the exact phenomenon F-7's suppression aggregate was built to bound on the inbound path
+(one row at `cap + 1`, not one per event) — the new path did not inherit it. It is only *minor*
+because the traffic is authenticated, CSRF-protected and confined to the tenant's own data, so it
+is self-inflicted noise rather than an attack surface. But it degrades AC-A2's feed, which is the
+sender's primary signal, precisely when something is going wrong. **Do this:** reuse
+`incrementSuppressed`'s shape, or write at most one `rate_limited` row per (file, requester, hour).
+
+### N-13 (minor; new) — a persisted folder id has no self-heal, and the comment above the CI step is now false
+
+Two small ones from the same fix passes:
+
+- `primeFolder` trusts `tenants.zoho_folder_id` unconditionally. If that folder is later trashed or
+  moved provider-side, every upload for that tenant targets a dead id forever — the lookup-by-name
+  fallback is unreachable because the cache hit short-circuits it. Pre-fix, `ensureFolder` would
+  have healed by re-creating. Bounded (uploads fail loudly rather than silently mis-filing) and
+  provider behaviour here is `@unverified-live`, so: add one line to spike 1's record-list — *"trash
+  the tenant folder, then upload: what does the API return for a dead `parent_id`?"* — and clear the
+  persisted id on that error class.
+- `.github/workflows/ci.yml:85-89` still carries the comment *"placeholder today — it only prints
+  'not implemented' and always exits 0 … drop `continue-on-error` here"*, above a step that has
+  neither property any more. The fix pass deleted the flag and left the comment that justified it.
+  This is the fifth consecutive pass in which a document describes a mechanism that the code no
+  longer implements, and it is now inside the very file the mechanism lives in. One-line deletion.
+
+### R-5 (minor; **still open**, carried) — non-UUID path ids still 500
+
+Unchanged from the fourth pass; re-probed at HEAD (CP-8):
+
+```
+GET /files/not-a-uuid = 500   GET /api/files/not-a-uuid/deliveries = 500   POST .../resend = 500
+```
+
+A Postgres `22P02` still escapes as an unhandled error, still contradicting the "a wrong tenant gets
+a plain 404, never a distinguishing detail" contract in `src/http/routes/files.ts:49-51`. One shared
+UUID format check in the route schema turns all of them into 404s.
+
+### R-4 residuals (minor; carried) — no ADR for the resend action
+
+`docs/decisions.md` is still at 20 ADRs with no entry for the resend action. A user-visible surface
+that sends mail, now carrying two non-obvious constraints — an eligibility whitelist and a partial
+unique index that decides a concurrency race — belongs where an architect will look for it. Fix
+pass 9's reasoning is excellent, but it lives only in a migration comment and a review report.
+
+### Housekeeping — closed
+
+The five untracked `*.probe.test.ts` files the fourth pass flagged are gone: `git status` is clean,
+and every file in `tests/review/` is tracked and running. My own eight probes and the `critic_p1`
+database are deleted.
+
+---
+
+### Per-AC verdict (against HEAD `d6031ac`)
+
+| AC | Fourth pass | Now | Note |
+|---|---|---|---|
+| **AC-U1** three artifacts | MET | **MET** | carried |
+| **AC-U2** flag OFF → raw Zoho link | MET with caveat | **MET with caveat** | carried; spike 1 |
+| **AC-U3** flag ON → branded page | MET with caveat (minor) | **MET with caveat (minor)** | carried; spike 4 |
+| **AC-U4** expiry enforced | **REGRESSED — NOT MET** for pre-0006 files | **MET with caveat — recovered, new caveat** | R-1 closed: verified on a genuine pre-0007 database, zero self-contradictory rows, backfilled row renders and saves correctly. New caveat **N-11**: a save on a `days`-mode file re-issues `expires_at` from now, extending it — a looser-direction change with no user intent, on every file. Enforcement machinery (sweep, job, `/readyz.strandedExpiries`) untouched and still sound. |
+| **AC-R1** DMARC-fail/absent → no delivery | unchanged, carried | **unchanged — carried, not re-probed** | C′/N-10 still gated on spike 3c |
+| **AC-R2** file chosen only from the token | MET | **MET** | carried |
+| **AC-R3** delivery to the verified From only | MET with caveat | **MET with caveat** | carried; resend still can only target the original row's own `requester_address` |
+| **AC-R4** ≤20 MB attach / larger Drive share | MET with caveat | **MET with caveat** | carried; per-tenant folder identity now survives restarts (R-3 closed, CP-5) |
+| **AC-R5** custom message + display name | MET | **MET** | carried |
+| **AC-R6** signature required | MET | **MET** | carried |
+| **AC-E1** auto-duplicate at the cap | MET with caveat | **MET with caveat** | carried; `SharingEngine` untouched again this pass |
+| **AC-E2** idempotent, serialized per (tenant, file) | MET | **MET** | carried |
+| **AC-A1** file-scoped access only | MET | **MET** | carried |
+| **AC-A2** every delivery audit-logged | MET | **MET with caveat (minor)** | rows are all there and the abuse bound is now correct; **N-12** is a noise bound, not a gap — a refused resend writes one unbounded row per click where the inbound path aggregates |
+| **AC-A3** tenant isolation | MET | **MET** | carried; the resend route's cross-tenant/cross-file 404s were re-probed in the fourth pass and nothing since touched that lookup |
+
+### What is genuinely good in these fix passes
+
+- **Both fixes chose the mechanism that cannot be raced, over the mechanism that is easier to
+  write.** A partial *unique* index with `ON CONFLICT DO NOTHING RETURNING` instead of a
+  read-then-insert; an advisory lock with a re-read *inside* the lock for folder resolution. Twelve
+  concurrent clicks producing exactly one mail is not a test that passed by luck.
+- **`checkResend` calls `checkInboundRequest` rather than re-implementing it.** The obvious fix was
+  to copy the four bucket checks into the resend path. Sharing the function means the two paths
+  cannot drift, which is the failure mode that produced R-2 in the first place.
+- **The R-1 fix shipped as `0007`, not as an edit to `0006`.** An already-applied migration does not
+  re-run; editing it would have looked correct in code review and fixed nothing on any existing
+  database. The `AND expiry_mode = 'none'` guard makes it safe to run after a file has already been
+  edited post-0006.
+- **The R-3 fix over-delivered.** Persistence, lookup-by-name, and a lock — three independent
+  defences where I asked for one. The migration comments explain *why* each exists, not what it does.
+- **The honesty infrastructure now has teeth and the documents that promise it are true.** Four
+  founder-facing counts, four independent measurements, four matches. That is rarer than it sounds.
+
+### Lessons filed
+
+One, appended to `docs/lessons.md` (2026-09-10): the N-11 rule — a control whose stored value is
+*derived from the moment it was set* must be re-derived only when the input actually changed, and a
+form must never submit a control the page did not show the current value of.
+
+---
+
+### Plain language, for the founder
+
+Both problems I flagged last time are genuinely fixed, and I checked them the hard way — I rebuilt a
+database at the exact old state to prove the expiry repair works on files that already exist, and I
+fired twelve simultaneous clicks at the "send again" button and got exactly one email out, with the
+per-recipient cap now holding at five an hour instead of sixty. Your test count, commit count and
+"nothing has touched a live provider yet" ledger are all accurate in every document I checked, and
+the CI check that guards them is switched on again — so you can go run the live spikes.
+
+One new thing, which I found while re-testing the expiry fix and which has been there all along:
+renaming a file quietly gives it a fresh 30 days. A file with five days of life left goes back to
+thirty because the settings page re-submits "expires in 30 days" as if you had just typed it, and
+the page never shows you the actual date, so nothing on screen tells you it moved. Expiry is a
+promise to the person you sent the file to, and this makes that promise longer without you asking —
+so it needs the same small fix R-1 got before a customer touches that form, though it does not hold
+up the live spikes at all.
