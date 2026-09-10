@@ -82,7 +82,6 @@ jobs:
         if: always()
         run: scripts/dev-db.sh stop
 
-      # TODO(backend-engineer): scripts/gen-verification-ledger.ts is a Lane B
       # placeholder today — it only prints "not implemented" and always exits 0.
       # Once it actually diffs docs/verification-ledger.md against the
       # @unverified-live / @verified-live(date) markers in src/adapters/**
@@ -90,7 +89,6 @@ jobs:
       # fails the build as intended.
       - name: Verification ledger check
         run: pnpm gen:ledger -- --check
-        continue-on-error: true
 
       - name: Build
         run: pnpm build
