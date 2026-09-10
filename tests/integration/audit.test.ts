@@ -102,4 +102,55 @@ describe.skipIf(!hasTestDatabase())('audit (AC-A2)', () => {
     expect(body.items[0]?.mechanism).toBe('attachment');
     expect(Number.isNaN(new Date(body.items[0]!.at).getTime())).toBe(false);
   });
+
+  it('GET /api/files/:id/deliveries returns resendable + resendPath, true only for failed/unconfirmed outcomes', async () => {
+    // Fix pass 8 (code-review.md polish-pass finding 3): a delivery that transitions to
+    // failed/unconfirmed AFTER the sender already has the page open only gets a resend
+    // button once this endpoint carries the same resendability signal the SSR row does.
+    const container = buildTestContainer();
+    const app = await buildApp({ container });
+    const { tenant, file } = await createTenantWithReadyFile(container, 'resendflag@example.com');
+
+    const failedDelivery = await deliveries.insertTerminal(container.pool, {
+      tenantId: tenant.id,
+      fileId: file.id,
+      requesterAddress: 'failed-req@example.com',
+      outcome: 'failed',
+      dmarc: 'pass',
+    });
+    // `insertTerminal` deliberately excludes 'sent' (that outcome only ever comes from
+    // `complete()`, the real fulfillment path) — seeded directly via SQL instead, same
+    // as `tests/e2e/smoke.e2e.ts` does for its own seeded-delivery assertion.
+    await container.pool.query(
+      `INSERT INTO deliveries (tenant_id, file_id, requester_address, mechanism, outcome)
+         VALUES ($1, $2, 'sent-req@example.com', 'attachment', 'sent')`,
+      [tenant.id, file.id],
+    );
+
+    const session = await container.services.auth.createSession(tenant.id);
+    const jar = new CookieJar();
+    jar.set('swy_sess', signCookie(session.id, container.config.SESSION_SECRET));
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/files/${file.id}/deliveries`,
+      headers: { cookie: jar.header() },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as {
+      items: Array<{
+        id: string;
+        outcome: string;
+        resendable: boolean;
+        resendPath: string;
+      }>;
+    };
+
+    const failedItem = body.items.find((i) => i.id === failedDelivery.id);
+    expect(failedItem?.resendable).toBe(true);
+    expect(failedItem?.resendPath).toBe(`/files/${file.id}/deliveries/${failedDelivery.id}/resend`);
+
+    const sentItem = body.items.find((i) => i.outcome === 'sent');
+    expect(sentItem?.resendable).toBe(false);
+  });
 });

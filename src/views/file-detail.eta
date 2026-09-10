@@ -195,7 +195,7 @@
     </form>
   </section>
 
-  <section class="deliveries-section" id="deliveries" data-file-id="<%= it.file.id %>" data-since="<%= it.deliverySinceIso %>" data-since-id="<%= it.deliverySinceId %>">
+  <section class="deliveries-section" id="deliveries" data-file-id="<%= it.file.id %>" data-since="<%= it.deliverySinceIso %>" data-since-id="<%= it.deliverySinceId %>" data-csrf="<%= it.csrfToken %>">
     <h2>מי קיבל את הקובץ</h2>
     <% if (it.deliveries.length === 0) { %>
     <p class="deliveries-empty" id="deliveries-empty">עדיין אף אחד לא ביקש את הקובץ הזה</p>

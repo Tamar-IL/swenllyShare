@@ -44,13 +44,31 @@ export class FakeFileStore implements FileStorePort {
    * within each. */
   readonly folders = new Map<string, string>();
 
-  private ensureFolder(name: string): string {
+  private resolveFolder(name: string): string {
     let folderId = this.folders.get(name);
     if (!folderId) {
       folderId = nextId('zoho-folder');
       this.folders.set(name, folderId);
     }
     return folderId;
+  }
+
+  /** Fix pass 8 (code-review.md polish-pass finding 2): part of `FileStorePort` now —
+   * `FilesService.publishFile` calls this directly (under its own DB advisory lock) the
+   * first time a tenant needs a folder, then persists the result to
+   * `tenants.zoho_folder_id`. No lookup-by-name fallback here (unlike the real adapters):
+   * this fake has no server-side state to look anything up against, so a "restart"
+   * scenario (a brand-new `FakeFileStore` instance) relies entirely on the caller priming
+   * the new instance's cache via `primeFolder` with the DB-known id. */
+  async ensureFolder(name: string): Promise<string> {
+    return this.resolveFolder(name);
+  }
+
+  /** Test/production seam: seeds this instance's cache with an already-known id (read
+   * from the DB by the caller) so a later `upload()`/`ensureFolder()` call for `name`
+   * never mints a fresh one — see `FileStorePort.primeFolder`'s doc comment. */
+  primeFolder(name: string, folderId: string): void {
+    this.folders.set(name, folderId);
   }
   /** Fix pass 5, F-E test seam: forces the NEXT `createPublicLink` call to return
    * `embedToken: null`, the same shape the real adapter returns whenever Zoho's response
@@ -75,7 +93,7 @@ export class FakeFileStore implements FileStorePort {
     }
     const bytes = Buffer.concat(chunks);
     const resourceId = nextId('zoho-res');
-    const folderId = this.ensureFolder(tenantFolder);
+    const folderId = this.resolveFolder(tenantFolder);
     this.resources.set(resourceId, { tenantFolder, folderId, name, bytes, sizeBytes });
     return { resourceId };
   }

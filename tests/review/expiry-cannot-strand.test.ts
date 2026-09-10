@@ -59,6 +59,8 @@ describe.skipIf(!hasTestDatabase())(
       const real = container.ports.fileStore;
       const alwaysFailsRevoke: FileStorePort = {
         upload: real.upload.bind(real),
+        ensureFolder: real.ensureFolder.bind(real),
+        primeFolder: real.primeFolder.bind(real),
         createPublicLink: real.createPublicLink.bind(real),
         openDownload: real.openDownload.bind(real),
         delete: real.delete.bind(real),

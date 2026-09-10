@@ -135,10 +135,13 @@ export class SharingEngine {
 
   /**
    * `provision(seq)`: reserve-then-recover-then-activate, all while holding the advisory
-   * lock (architecture.md §5) — `files.copy` is the one external call this codebase makes
-   * inside a transaction, accepted because double-provisioning is the failure most worth
-   * excluding and the `intent_seq` unique constraint + `findByIntent` recovery make even a
-   * lost lock safe.
+   * lock (architecture.md §5) — `files.copy` was the first external call this codebase
+   * made inside a transaction, accepted because double-provisioning is the failure most
+   * worth excluding and the `intent_seq` unique constraint + `findByIntent` recovery make
+   * even a lost lock safe. Fix pass 8 (code-review.md polish-pass finding 2) applies the
+   * identical idiom a second time — `FilesService`'s tenant-folder resolution
+   * (`ensureFolder` under the `swenlly.tenant-folder` advisory lock) — for the same
+   * reason: avoiding a duplicate-create is worth one held external call.
    */
   private async provision(
     client: PoolClient,

@@ -12,6 +12,7 @@ import {
   OUTCOME_META,
   mechanismLabel,
   deliveryAddressLabel,
+  canResendDelivery,
   formatHebrewDate,
   formatHebrewDateTime,
   formatByteCeiling,
@@ -171,13 +172,10 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
           pillClass: OUTCOME_META[d.outcome].pillClass,
           outcomeLabel: OUTCOME_META[d.outcome].label,
           atLabel: formatHebrewDateTime(d.created_at),
-          // Fix pass 7 (critic N-2, "no way to resend"): the "שלח שוב" button only makes
-          // sense on a delivery attempt that actually finalized as not-delivered — never
-          // `sent` (succeeded), `queued`/`sending`/`dispatching`/`granted` (still in
-          // flight), or `quarantined`/`rate_limited`/`expired`/`not_allowlisted` (policy
-          // blocks, not delivery attempts — this is also every outcome the aggregate
-          // `suppressed` row can ever have, so it never shows the button either).
-          canResend: d.outcome === 'failed' || d.outcome === 'unconfirmed',
+          // Fix pass 8 (finding 3): now the shared `canResendDelivery` helper (also used
+          // by the JSON poll endpoint) instead of an inline condition duplicated in two
+          // places.
+          canResend: canResendDelivery(d.outcome),
         })),
       });
     },
@@ -202,7 +200,16 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
             displayName: body.displayName,
             customMessage: body.customMessage,
             expiryMode: body.expiryMode as ExpiryMode | undefined,
-            expiryDays: body.expiryDays ? Number(body.expiryDays) : undefined,
+            // Fix pass 8 (code-review.md polish-pass finding 1): distinguish "the field
+            // was never submitted" (`undefined` -> `SettingsService.resolveExpiry` falls
+            // back to `DEFAULT_EXPIRY_DAYS`, the intended behavior) from "the field WAS
+            // submitted but is blank/garbage" (a `type="number"` input clears itself to
+            // `""` on an invalid value a user typed) — the old `body.expiryDays ? ... :
+            // undefined` treated both the same way, silently substituting the default
+            // for a value the sender thought they'd set. `Number('')` is `0`, which
+            // `resolveExpiry`'s existing `days <= 0` guard already rejects with a
+            // validation error instead of a silent default.
+            expiryDays: body.expiryDays !== undefined ? Number(body.expiryDays) : undefined,
             expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,
             allowlistMode: body.allowlistMode as AllowlistMode | undefined,
             allowlist,

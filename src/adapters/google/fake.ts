@@ -46,13 +46,29 @@ export class FakeDriveShare implements DriveSharePort {
 
   constructor(private quotaPerFile: number = Number.POSITIVE_INFINITY) {}
 
-  private ensureFolder(name: string): string {
+  private resolveFolder(name: string): string {
     let folderId = this.folders.get(name);
     if (!folderId) {
       folderId = `drive-folder-${this.folders.size + 1}`;
       this.folders.set(name, folderId);
     }
     return folderId;
+  }
+
+  /** Fix pass 8 (code-review.md polish-pass finding 2): part of `DriveSharePort` now —
+   * `FilesService.publishFile` calls this directly (under its own DB advisory lock) the
+   * first time a tenant needs a folder, then persists the result to
+   * `tenants.drive_folder_id`. No lookup-by-name fallback here (unlike the real
+   * adapter): a "restart" scenario (a brand-new `FakeDriveShare` instance) relies on the
+   * caller priming the new instance's cache via `primeFolder` with the DB-known id. */
+  async ensureFolder(name: string): Promise<string> {
+    return this.resolveFolder(name);
+  }
+
+  /** Test/production seam: seeds this instance's cache with an already-known id — see
+   * `DriveSharePort.primeFolder`'s doc comment. */
+  primeFolder(name: string, folderId: string): void {
+    this.folders.set(name, folderId);
   }
 
   /** Test inspection: which cached folder id a Drive file currently lives under. */
@@ -96,7 +112,7 @@ export class FakeDriveShare implements DriveSharePort {
       bytes: Buffer.concat(chunks),
       appProperties: {},
       permissions: new Set(),
-      folderId: this.ensureFolder(tenantFolder),
+      folderId: this.resolveFolder(tenantFolder),
     });
     return { driveFileId };
   }

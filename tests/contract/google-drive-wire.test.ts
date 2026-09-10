@@ -48,6 +48,13 @@ describe('GoogleDriveShare (real adapter) — offline wire-shape tests', () => {
     // Fix pass 7 (critic-report.md #6): `uploadResumable` now resolves the tenant's own
     // folder (creating it once, then caching it) before initiating the upload session —
     // one extra POST to the plain (non-upload) Drive `files` endpoint.
+    // Fix pass 8 (finding 2): `ensureFolder` now looks up an existing folder by name
+    // (GET, Drive's own `files.list` query grammar) BEFORE creating one — mocked here as
+    // "nothing found" so this test's create-path assertions are unaffected; the
+    // lookup-hit/lookup-shape behavior gets its own dedicated tests below.
+    pool
+      .intercept({ path: pathnameIs('/drive/v3/files'), method: 'GET' })
+      .reply(200, { files: [] });
     let folderBody: unknown;
     pool.intercept({ path: pathnameIs('/drive/v3/files'), method: 'POST' }).reply(async (opts) => {
       const url = mockUrl(opts.path);
@@ -126,6 +133,49 @@ describe('GoogleDriveShare (real adapter) — offline wire-shape tests', () => {
       `bytes 0-${CHUNK_SIZE_BYTES - 1}/${sizeBytes}`,
       `bytes ${CHUNK_SIZE_BYTES}-${sizeBytes - 1}/${sizeBytes}`,
     ]);
+  });
+
+  it('ensureFolder: looks up the tenant folder by name (files.list) before ever creating one', async () => {
+    // Fix pass 8 (code-review.md polish-pass finding 2): a lost `tenants.drive_folder_id`
+    // row must not duplicate the tenant's real folder — `ensureFolder` tries a
+    // lookup-by-name first, and only creates when nothing matches.
+    const pool = mockAgent.get(GOOGLE_ORIGIN);
+    let lookupQuery: string | null = null;
+    let createCalls = 0;
+    pool.intercept({ path: pathnameIs('/drive/v3/files'), method: 'GET' }).reply((opts) => {
+      lookupQuery = mockUrl(opts.path).searchParams.get('q');
+      return { statusCode: 200, data: { files: [] } }; // nothing found -> falls through
+    });
+    pool.intercept({ path: pathnameIs('/drive/v3/files'), method: 'POST' }).reply(() => {
+      createCalls += 1;
+      return { statusCode: 200, data: { id: 'tenant-folder-new' } };
+    });
+
+    const folderId = await drive.ensureFolder('tenant-abc');
+
+    expect(folderId).toBe('tenant-folder-new');
+    expect(createCalls).toBe(1);
+    expect(lookupQuery).toBe(
+      "name = 'tenant-abc' and mimeType = 'application/vnd.google-apps.folder' and " +
+        "trashed = false and 'root-folder-1' in parents",
+    );
+  });
+
+  it('ensureFolder: reuses a folder found by name, without ever calling create', async () => {
+    const pool = mockAgent.get(GOOGLE_ORIGIN);
+    let createCalls = 0;
+    pool
+      .intercept({ path: pathnameIs('/drive/v3/files'), method: 'GET' })
+      .reply(200, { files: [{ id: 'existing-tenant-folder' }] });
+    pool.intercept({ path: pathnameIs('/drive/v3/files'), method: 'POST' }).reply(() => {
+      createCalls += 1;
+      return { statusCode: 200, data: { id: 'should-not-be-used' } };
+    });
+
+    const folderId = await drive.ensureFolder('tenant-abc');
+
+    expect(folderId).toBe('existing-tenant-folder');
+    expect(createCalls).toBe(0);
   });
 
   it('copy: POSTs to files/{id}/copy with appProperties.swenllyIntent and supportsAllDrives=true', async () => {

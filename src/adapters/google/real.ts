@@ -275,9 +275,51 @@ export class GoogleDriveShare implements DriveSharePort {
    * parent when none is given, so every auto-duplicated copy (`SharingEngine`) already
    * lands in the same tenant folder as the original for free.
    */
-  private async ensureFolder(name: string, parentId: string | undefined): Promise<string> {
+  /**
+   * @unverified-live
+   * Fix pass 8 (code-review.md polish-pass finding 2): best-effort second line of
+   * defense behind `FilesService.publishFile`'s DB-persisted-id + advisory-lock
+   * mechanism (the PRIMARY de-duplication path) — if a tenant's `tenants.drive_folder_id`
+   * row is ever lost, a lookup-by-name here still finds the real existing folder instead
+   * of blindly creating a duplicate. Uses Drive's own documented `files.list` query
+   * grammar (`name = '...' and '<parent>' in parents and mimeType = '...folder' and
+   * trashed = false`) — unlike the Zoho equivalent, this ONE is corroborated by Drive's
+   * public API reference, not a guess (same distinction `ensureFolder`'s own doc comment
+   * below already draws for the create call).
+   */
+  private async findFolderByName(
+    name: string,
+    parentId: string | undefined,
+  ): Promise<string | undefined> {
+    const qParts = [
+      `name = '${escapeDriveQueryValue(name)}'`,
+      `mimeType = 'application/vnd.google-apps.folder'`,
+      'trashed = false',
+    ];
+    if (parentId) qParts.push(`'${escapeDriveQueryValue(parentId)}' in parents`);
+    const params = new URLSearchParams({
+      q: qParts.join(' and '),
+      fields: 'files(id)',
+      supportsAllDrives: 'true',
+      includeItemsFromAllDrives: 'true',
+    });
+    if (this.config.sharedDriveId) {
+      params.set('corpora', 'drive');
+      params.set('driveId', this.config.sharedDriveId);
+    }
+    const url = `${DRIVE_API_BASE}/files?${params.toString()}`;
+    const json = await this.driveJson<{ files?: { id: string }[] }>('GET', url);
+    return json.files?.[0]?.id;
+  }
+
+  private async resolveFolder(name: string, parentId: string | undefined): Promise<string> {
     const cached = this.tenantFolderCache.get(name);
     if (cached) return cached;
+    const existing = await this.findFolderByName(name, parentId);
+    if (existing) {
+      this.tenantFolderCache.set(name, existing);
+      return existing;
+    }
     const metadata: Record<string, unknown> = {
       name,
       mimeType: 'application/vnd.google-apps.folder',
@@ -299,6 +341,23 @@ export class GoogleDriveShare implements DriveSharePort {
     return json.id;
   }
 
+  /**
+   * @unverified-live
+   * Fix pass 8 (finding 2): now public (part of `DriveSharePort`) — resolves the
+   * caller's own configured root/Shared Drive as the parent, so callers never need to
+   * know that detail. `uploadResumable`'s own internal call below keeps working
+   * unchanged.
+   */
+  async ensureFolder(tenantFolder: string): Promise<string> {
+    const rootParent = this.config.rootFolderId ?? this.config.sharedDriveId;
+    return this.resolveFolder(tenantFolder, rootParent);
+  }
+
+  /** Fix pass 8 (finding 2): see `DriveSharePort.primeFolder`'s doc comment. */
+  primeFolder(tenantFolder: string, folderId: string): void {
+    this.tenantFolderCache.set(tenantFolder, folderId);
+  }
+
   private async initiateResumableSession(
     tenantFolder: string,
     name: string,
@@ -311,8 +370,7 @@ export class GoogleDriveShare implements DriveSharePort {
     // configured (keeps the drive tidy); fall back to the drive id itself.
     // Fix pass 7 (#6): the parent is now the TENANT's own folder under that root/drive,
     // not the root/drive itself — see `ensureFolder`'s doc comment.
-    const rootParent = this.config.rootFolderId ?? this.config.sharedDriveId;
-    const parent = await this.ensureFolder(tenantFolder, rootParent);
+    const parent = await this.ensureFolder(tenantFolder);
     metadata.parents = [parent];
 
     const url = `${DRIVE_UPLOAD_BASE}/files?uploadType=resumable&supportsAllDrives=true`;

@@ -401,6 +401,32 @@ export class ZohoFileStore implements FileStorePort {
 
   /**
    * @unverified-live
+   * Fix pass 8 (code-review.md polish-pass finding 2): best-effort second line of
+   * defense behind `FilesService.publishFile`'s DB-persisted-id + advisory-lock
+   * mechanism (the PRIMARY de-duplication path — see that method's doc comment) — if a
+   * tenant's `tenants.zoho_folder_id` row is ever lost (a manual DB edit, a restore from
+   * an older backup, ...) a lookup-by-name here still finds the real existing folder
+   * instead of blindly creating a duplicate. MODELED, like `uploadLargeFile` above:
+   * WorkDrive's own community-referenced "list a folder's children" endpoint is `GET
+   * {apiBase}/files/<parentId>/files`; no live account was reachable to confirm the
+   * exact response envelope or whether it supports server-side name filtering, so this
+   * fetches the page and filters client-side rather than trusting an unconfirmed query
+   * parameter name. Confirm against a live account before relying on it
+   * (docs/runbooks/live-spikes.md spike #1).
+   */
+  private async findFolderByName(parentId: string, name: string): Promise<string | undefined> {
+    const url = `${this.config.apiBase}/files/${encodeURIComponent(parentId)}/files`;
+    const json = await this.zohoRequest<{
+      data?: { id?: string; attributes?: { name?: string; type?: string } }[];
+    }>('GET', url);
+    const match = json.data?.find(
+      (entry) => entry.attributes?.name === name && entry.attributes?.type === 'folder',
+    );
+    return match?.id;
+  }
+
+  /**
+   * @unverified-live
    * Fix pass 7 (critic-report.md #6, architecture.md §3/§5): creates (or reuses, via
    * `tenantFolderCache`) one WorkDrive subfolder per tenant, under `ZOHO_TEAM_FOLDER_ID`,
    * named `name` — `POST {apiBase}/files` with a JSON:API `{data: {type: 'files',
@@ -410,13 +436,23 @@ export class ZohoFileStore implements FileStorePort {
    * spike #1 should record whether this shape is right) — if it turns out folders need a
    * distinct `type` value or a different endpoint entirely, this is the one place to fix
    * it; every caller only ever sees a `folderId` string back.
+   *
+   * Fix pass 8 (finding 2): now public (part of `FileStorePort`, not just an `upload()`
+   * internal) and, on a cache miss, tries `findFolderByName` BEFORE creating — see that
+   * method's doc comment. The in-memory `tenantFolderCache` remains a fast path only;
+   * `FilesService.publishFile` is what makes the DB the source of truth across restarts.
    */
-  private async ensureFolder(name: string, parentId: string): Promise<string> {
+  async ensureFolder(name: string): Promise<string> {
     const cached = this.tenantFolderCache.get(name);
     if (cached) return cached;
+    const existing = await this.findFolderByName(this.config.teamFolderId, name);
+    if (existing) {
+      this.tenantFolderCache.set(name, existing);
+      return existing;
+    }
     const url = `${this.config.apiBase}/files`;
     const body = JSON.stringify({
-      data: { type: 'files', attributes: { name, parent_id: parentId } },
+      data: { type: 'files', attributes: { name, parent_id: this.config.teamFolderId } },
     });
     const json = await this.zohoRequest<ZohoFolderResponse>('POST', url, {
       body,
@@ -428,6 +464,11 @@ export class ZohoFileStore implements FileStorePort {
     }
     this.tenantFolderCache.set(name, folderId);
     return folderId;
+  }
+
+  /** Fix pass 8 (finding 2): see `FileStorePort.primeFolder`'s doc comment. */
+  primeFolder(name: string, folderId: string): void {
+    this.tenantFolderCache.set(name, folderId);
   }
 
   /** @unverified-live */
@@ -460,7 +501,7 @@ export class ZohoFileStore implements FileStorePort {
     // of the storage layer despite architecture.md §3/§5 requiring it. `ensureFolder`
     // resolves (or creates, once, then caches) that tenant's own subfolder; every upload
     // for this tenant lands under it instead of the shared team root.
-    const parentId = await this.ensureFolder(tenantFolder, this.config.teamFolderId);
+    const parentId = await this.ensureFolder(tenantFolder);
     if (sizeBytes <= threshold) {
       return this.uploadSimple(parentId, stream, name);
     }

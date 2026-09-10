@@ -305,6 +305,12 @@
     // poll never re-matches its own anchor row — see deliveries.ts listForFile()'s doc
     // comment for why `since` alone (millisecond-precision) isn't a safe cursor on its own.
     var sinceId = deliveriesSection.getAttribute('data-since-id') || '';
+    // Fix pass 8 (code-review.md polish-pass finding 3): the same CSRF token the SSR
+    // resend/settings/delete forms already carry as a hidden `_csrf` field
+    // (`file-detail.eta`) — stamped onto this section's own `data-csrf` attribute so a
+    // row that only ever existed via this poll (never server-rendered) can still submit
+    // a resend form.
+    var deliveriesCsrfToken = deliveriesSection.getAttribute('data-csrf') || '';
 
     function mechanismLabel(m) {
       if (m === 'attachment') return 'קובץ מצורף';
@@ -330,6 +336,36 @@
       );
     }
 
+    // Fix pass 8 (code-review.md polish-pass finding 3): one template function for the
+    // 5th ("actions") cell, so a polled-in row (this function) and the SSR row
+    // (`file-detail.eta`) never drift out of sync on what the resend button looks like.
+    // Renders the SAME markup as the SSR row's `<td data-label="פעולות">` — always the
+    // `<td>` (so a polled row never has one fewer cell than the header, the layout
+    // defect noted alongside the missing-button bug), with the form inside only when
+    // `resendable` is true.
+    function buildResendCell(item) {
+      var td = document.createElement('td');
+      td.setAttribute('data-label', 'פעולות');
+      if (item.resendable) {
+        var formEl = document.createElement('form');
+        formEl.method = 'post';
+        formEl.action =
+          item.resendPath || '/files/' + fileId + '/deliveries/' + item.id + '/resend';
+        var hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = '_csrf';
+        hidden.value = deliveriesCsrfToken;
+        formEl.appendChild(hidden);
+        var btn = document.createElement('button');
+        btn.type = 'submit';
+        btn.className = 'btn btn-secondary btn-sm';
+        btn.textContent = 'שלח שוב';
+        formEl.appendChild(btn);
+        td.appendChild(formEl);
+      }
+      return td;
+    }
+
     function prependRow(item) {
       var meta = outcomeMeta[item.outcome] || [item.outcome, 'pill-expired'];
       var tr = document.createElement('tr');
@@ -348,6 +384,7 @@
         td.appendChild(span);
         tr.appendChild(td);
       });
+      tr.appendChild(buildResendCell(item));
       tbody.insertBefore(tr, tbody.firstChild);
     }
 

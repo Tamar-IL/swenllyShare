@@ -348,6 +348,29 @@ whether it was originally `days`-mode).
 
 **Pinned:** `tests/review/expiry-mode-migration-backfill.probe.test.ts` (`it.fails`).
 
+> **Fix status (fix pass 8, backend-engineer): FIXED.** New migration
+> `0007_expiry_mode_backfill_and_tenant_folders.sql` (0006 is presumably already applied
+> in some environments and is never edited) adds exactly the backfill this finding
+> named: `UPDATE files SET expiry_mode = 'custom' WHERE expires_at IS NOT NULL AND
+> expiry_mode = 'none'`, leaving a genuinely-`none` row (`expires_at IS NULL`) untouched.
+> Also closed a second gap in the same area, raised alongside this finding rather than
+> pinned separately: `SettingsService.updateSettings`'s `days` mode already rejected an
+> explicit non-positive/NaN day count (`resolveExpiry`'s `days <= 0` guard), but the HTTP
+> route (`src/http/routes/files.ts`) collapsed "the field was never submitted" and "the
+> field was submitted but blank" into the same `undefined` (`body.expiryDays ? Number(...)
+> : undefined`), so a blank `expiryDays` (what a `type="number"` input submits when the
+> browser clears an invalid value) silently fell back to `DEFAULT_EXPIRY_DAYS` instead of
+> surfacing a validation error. Now `body.expiryDays !== undefined ? Number(...) :
+> undefined` — an explicitly-submitted `''` becomes `Number('') === 0`, which the
+> existing guard already rejects; a truly-absent field still defaults, unchanged.
+> `tests/review/expiry-mode-migration-backfill.probe.test.ts` is replaced by
+> `tests/review/expiry-mode-backfill-migration.test.ts` (same scratch-database
+> technique — migrations 0001-0006, seed a pre-0007-shaped row, apply 0007, assert the
+> backfill — now asserting the fixed behavior, plus a `NULL`-expiry row staying `'none'`
+> and the new tenant-folder columns defaulting to `NULL`); the HTTP-layer half is covered
+> by new `tests/review/expiry-days-validation.test.ts` (domain-level rejection, the
+> blank-field HTTP case, and the omitted-field-still-defaults case).
+
 #### 2. [MEDIUM-HIGH] Per-tenant folder `ensureFolder` (Zoho + Drive adapters) races on concurrent first uploads and has no identity across a process restart
 
 `src/adapters/zoho/real.ts` (`ensureFolder`, ~L399) and `src/adapters/google/real.ts`
@@ -376,6 +399,54 @@ resolved folder id on `tenants`, and look it up before ever creating).
 
 **Pinned:** `tests/review/tenant-folder-race.probe.test.ts` (2× `it.fails`, one per gap).
 
+> **Fix status (fix pass 8, backend-engineer): FIXED**, via the exact idiom this finding
+> suggested — the `SharingEngine.provision`-style "advisory lock + persisted id +
+> recovery lookup" shape, applied to a tenant-scoped resource instead of a file-scoped
+> one. Migration `0007_expiry_mode_backfill_and_tenant_folders.sql` adds nullable
+> `tenants.zoho_folder_id`/`drive_folder_id`; a new `tenants.setFolderIds` repository
+> method persists them. `FileStorePort`/`DriveSharePort` each gain two methods:
+> `ensureFolder(tenantFolder)` (the existing resolve-or-create logic, now public instead
+> of an `upload()`/`uploadResumable()` internal) and `primeFolder(tenantFolder,
+> folderId)` (seeds the adapter's in-memory cache with an already-known id, no network
+> call). `FilesService.publishFile` (new private `resolveTenantFolder`) reads the
+> tenant row before each provider's upload step; if the column is already set, it's a
+> single synchronous cache-prime — no lock, no network call. Only a tenant's genuinely
+> first upload takes the `swenlly.tenant-folder` Postgres advisory lock (a second,
+> independent namespace from `SharingEngine`'s own `swenlly.share`) and re-reads the
+> tenant row INSIDE the lock before calling `ensureFolder`, so a concurrent resolver that
+> already won the race while this caller waited for the lock is discovered and primed
+> with the WINNER's id instead of creating a second folder — only the true first
+> resolver for a tenant ever calls `ensureFolder`, in this process or any other, since
+> the lock is a DB advisory lock, not an in-memory mutex. `sharing-engine.ts`'s own doc
+> comment (which previously claimed to be "the one external call this codebase makes
+> inside a transaction") was updated to acknowledge this second, deliberate instance of
+> the same tradeoff.
+>
+> Both real adapters' `ensureFolder` also gained the suggested belt-and-braces: a
+> lookup-by-name BEFORE ever creating, so a lost/never-set DB row still finds the real
+> existing folder instead of duplicating it. Drive uses `files.list` with the exact
+> query this finding named (`name = '...' and '<parent>' in parents and mimeType =
+> 'application/vnd.google-apps.folder' and trashed = false`) — Google's own documented
+> query grammar, corroborated confidence. Zoho's has no reachable primary doc for a
+> folder-listing endpoint (`workdrive.zoho.com` egress-blocked, same constraint as every
+> other Zoho endpoint in this file) — modeled as `GET
+> {apiBase}/files/<parentId>/files`, filtered client-side, and marked
+> `@unverified-live`/flagged for `docs/runbooks/live-spikes.md` spike #1 like every other
+> guessed Zoho shape in this file.
+>
+> `tests/review/tenant-folder-race.probe.test.ts` is deleted (its two pins exercised the
+> bare Zoho adapter directly, which is no longer where de-duplication happens — the
+> adapter's own cache is now explicitly a fast path, not the correctness mechanism) and
+> replaced by tests at the layer the fix actually lives in:
+> `tests/integration/tenant-folder-persistence.test.ts` (8 concurrent first-time
+> `publishFile` calls on distinct Postgres connections create exactly one folder per
+> provider; a simulated process restart — a fresh container, same DB — reuses the
+> persisted id rather than minting a new one) and dedicated wire-level tests for the
+> lookup-by-name request/response shape in `tests/contract/zoho-workdrive-wire.test.ts`
+> and `tests/contract/google-drive-wire.test.ts` (lookup-miss falls through to create;
+> lookup-hit never calls create). `docs/verification-ledger.md` regenerated
+> (`findFolderByName` added for both adapters).
+
 #### 3. [MEDIUM] The resend button never appears on deliveries that arrive via live polling — only on the initial page render
 
 `src/public/island.js`'s `prependRow` (~L333) builds exactly 4 `<td>`s (address,
@@ -396,6 +467,30 @@ or switch the resend action to use the existing CSRF header the island already s
 its upload XHR) in each item, and teach `prependRow` to render the 5th cell/form the same
 way the server template does.
 
+> **Fix status (fix pass 8, backend-engineer): FIXED.** `GET /api/files/:id/deliveries`
+> now returns `resendable: boolean` and `resendPath: string` per item, both computed the
+> same way the SSR row is (`resendable` via a new shared `canResendDelivery(outcome)`
+> helper in `src/lib/presentation.ts`, used by BOTH `files.ts`'s SSR route and
+> `api-files.ts`'s JSON route, replacing the inline condition that used to live only in
+> the SSR path). For the CSRF token: rather than switching to a header (the review's
+> alternative suggestion), `file-detail.eta`'s `<section id="deliveries">` gained a
+> `data-csrf` attribute carrying the same `it.csrfToken` the settings/delete/resend forms
+> already render as a hidden field — the same pattern the upload form already uses
+> (`data-upload-form`'s own `data-csrf`), so `island.js` reads it with no new plumbing.
+> `island.js`'s `prependRow` gained one shared template function, `buildResendCell`,
+> called for every polled-in row (matching the finding's ask to "reuse one template
+> function") — it always renders the `<td>` (fixing the layout defect: a polled row no
+> longer has one fewer cell than the header) and only renders the form inside when
+> `resendable` is true, using `resendPath` from the payload for the form's `action`.
+>
+> Tested at the JSON level in `tests/integration/audit.test.ts` (a `failed` delivery
+> returns `resendable: true` + the exact `resendPath`; a `sent` one returns `resendable:
+> false`), and the e2e smoke test (`tests/e2e/smoke.e2e.ts`) was extended minimally per
+> the finding's own suggestion: seeds a `failed` delivery via SQL after the page is
+> already open, waits for the poll to render it, and asserts exactly one resend `<form
+> action=".../resend">` appears — proving the button now shows up for a delivery that
+> only ever arrived via polling, not just on initial SSR.
+
 #### 4. [LOW-MEDIUM] `tests/e2e/smoke.e2e.ts`'s `bootApp()` leaks the child process on a failed readiness wait
 
 `bootApp` (~L103–149) does `const child = spawn(...)` and then `await waitForCondition(...)`
@@ -414,6 +509,28 @@ err; }`.
 
 **Pinned (control-flow reproduction, not the actual e2e file):**
 `tests/review/e2e-bootApp-leak.probe.test.ts` (`it.fails`).
+
+> **Fix status (fix pass 8, backend-engineer): FIXED**, exactly as suggested plus one
+> extra hardening the finding's own wording flagged as a follow-on. The readiness wait
+> is now wrapped via a small extracted helper,
+> `killChildOnFailedReadiness(child, waitReady)`
+> (`tests/e2e/support/boot-process.ts`) — `try { await waitReady() } catch (err) {
+> child.kill('SIGKILL'); throw err; }` — so a failed boot always kills the child before
+> the rejection propagates out of `bootApp`. Also fixed `afterAll`: it was a plain
+> sequential `await` chain (`context.close()` then `browser.close()` then `app.stop()`
+> then the temp-dir removal), so ONE failing cleanup step skipped every step after it,
+> including `app?.stop()` — the only call that actually kills the spawned child. Each
+> step now has its own `.catch(() => {})`, so `app?.stop()` (and the temp-dir removal)
+> runs regardless of what happened earlier in the hook.
+>
+> `tests/review/e2e-bootApp-leak.probe.test.ts` is deleted — it reproduced the buggy
+> control-flow shape in an isolated, throwaway function rather than testing the real
+> fix. In its place: the risky "spawn, then await a condition that can throw" logic is
+> now extracted into the reusable, independently-testable helper above (used by the real
+> `bootApp`), with a fast, always-runs regression test at
+> `tests/unit/boot-process.test.ts` (no `E2E=1` needed — it spawns trivial Node
+> subprocesses directly) proving BOTH directions: a throwing readiness check kills the
+> child, and a succeeding one leaves it running.
 
 ### Should-fix / suggestions (non-blocking)
 
@@ -477,3 +594,40 @@ storage. Findings 3–4 are real but narrower (a UX gap on the polling path; a C
 process leak) and can ride in the same or a fast-follow pass. Everything else in this diff
 — the suppression-row aggregation, the null-requester-address plumbing, the resend feature's
 tenant scoping and gate re-checks, and the logger consolidation — is solid.
+
+---
+
+## Fix pass 8 status (backend-engineer)
+
+All four "Polish pass review — 2026-09-10" findings above are **FIXED** — see the
+fix-status note inline under each finding for specifics (migration, files touched,
+tests). Summary:
+
+1. **Expiry-mode backfill:** migration `0007_expiry_mode_backfill_and_tenant_folders.sql`
+   backfills `expiry_mode='custom'` for every pre-existing row with a real `expires_at`;
+   `SettingsService`'s `days`-mode validation gap (an explicitly-blank `expiryDays` field
+   silently defaulting instead of rejecting) is also closed, at the HTTP-route layer
+   where the ambiguity actually lived.
+2. **Tenant folder persistence:** `tenants.zoho_folder_id`/`drive_folder_id` (same
+   migration), resolved-and-persisted by `FilesService.publishFile` under a
+   `swenlly.tenant-folder` Postgres advisory lock (the same idiom `SharingEngine`
+   already uses), with a lookup-by-name fallback added to both real adapters'
+   `ensureFolder` as a second line of defense.
+3. **Resend button on polled rows:** `GET /api/files/:id/deliveries` now returns
+   `resendable`/`resendPath`; `island.js`'s `prependRow` renders the identical cell
+   shape the SSR row does, via one shared template function.
+4. **e2e child-process leak:** `bootApp`'s readiness wait is wrapped in a small,
+   independently-tested `killChildOnFailedReadiness` helper; `afterAll`'s cleanup steps
+   are now independent of each other's failures.
+
+Every `tests/review/*.probe.test.ts` file this review left behind is gone — each real
+pin (a genuine bug) is now a permanent regression test in a properly named file
+asserting the FIXED behavior, and each confirmed-clean pin (`incrementSuppressed`
+concurrency, resend-respects-expiry-gate) was promoted to a permanent test unchanged
+apart from dropping the "probe"/"throwaway" framing. `docs/verification-ledger.md` was
+regenerated (`findFolderByName` added for both adapters; nothing else changed shape).
+
+Quality bar: `pnpm typecheck && pnpm lint && pnpm exec prettier --check . && pnpm test
+&& pnpm gen:ledger -- --check` is green with zero `it.fails` anywhere in the suite, and
+`E2E=1 pnpm test:e2e` passes (including the new seeded-`failed`-delivery/resend-button
+assertion). Nothing was committed.

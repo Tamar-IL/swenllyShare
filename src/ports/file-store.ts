@@ -16,6 +16,26 @@ export interface FileStorePort {
   ): Promise<{ resourceId: string }>;
 
   /**
+   * Resolves `tenantFolder` (== the caller's `tenantId`) to a real WorkDrive folder id,
+   * creating it if none exists yet. `upload()` already calls this internally (so this
+   * suite's plain contract tests, which call `upload()` directly with no orchestration
+   * around it, keep working unchanged) — it is exposed on the port separately so
+   * `FilesService.publishFile` (fix pass 8, code-review.md polish-pass finding 2) can
+   * resolve-and-persist a tenant's folder id to `tenants.zoho_folder_id` ONCE, under a DB
+   * advisory lock, instead of leaving de-duplication to each adapter's own in-memory
+   * cache (which is empty on every process restart and has no cross-process lock).
+   */
+  ensureFolder(tenantFolder: string): Promise<string>;
+
+  /**
+   * Seeds the adapter's in-memory folder cache with an already-known id (read from
+   * `tenants.zoho_folder_id` by the caller) so the next `ensureFolder`/`upload` call for
+   * `tenantFolder` skips resolution entirely — the fast path that keeps the DB, not the
+   * cache, as the source of truth across a restart (fix pass 8, finding 2).
+   */
+  primeFolder(tenantFolder: string, folderId: string): void;
+
+  /**
    * Creates (or returns the existing) public link for `resourceId`. `embedToken` is
    * `null` when the provider's response carried no distinct embed identifier (fix pass 5,
    * F-E, `docs/reviews/critic-report.md`) — callers must NEVER derive one from `url`'s own

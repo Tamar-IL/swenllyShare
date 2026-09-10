@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Container } from '../../container.js';
 import { requireSessionApi } from '../plugins/auth.js';
 import { AppError, ErrorCode } from '../../lib/errors.js';
-import { deliveryAddressLabel } from '../../lib/presentation.js';
+import { deliveryAddressLabel, canResendDelivery } from '../../lib/presentation.js';
 
 /** `POST /api/files` (streamed multipart upload) and the file-status/deliveries JSON
  * endpoints (architecture.md §6, §11). */
@@ -79,6 +79,15 @@ export function registerApiFileRoutes(app: FastifyInstance, container: Container
           mechanism: d.mechanism,
           outcome: d.outcome,
           at: d.created_at.toISOString(),
+          // Fix pass 8 (code-review.md polish-pass finding 3): a delivery that
+          // transitions to `failed`/`unconfirmed` AFTER the sender already has the page
+          // open (the normal case — the worker sets that outcome well after the page's
+          // initial SSR) used to never get a resend button until a manual reload, since
+          // this JSON payload carried neither the resendability flag nor a path for the
+          // form's `action`. `island.js`'s `prependRow` renders the identical `<td>`
+          // shape the SSR row does (`file-detail.eta`) whenever `resendable` is true.
+          resendable: canResendDelivery(d.outcome),
+          resendPath: `/files/${request.params.id}/deliveries/${d.id}/resend`,
         })),
         total,
       };

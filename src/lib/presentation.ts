@@ -83,6 +83,21 @@ export function mechanismLabel(mechanism: DeliveryMechanism | null): string {
 }
 
 /**
+ * Fix pass 7 (critic N-2, "no way to resend"): the "שלח שוב" button only makes sense on
+ * a delivery attempt that actually finalized as not-delivered — never `sent`
+ * (succeeded), `queued`/`sending`/`dispatching`/`granted` (still in flight), or
+ * `quarantined`/`rate_limited`/`expired`/`not_allowlisted` (policy blocks, not delivery
+ * attempts — also every outcome the aggregate `suppressed` row can ever have, so it
+ * never shows the button either). Shared by both the SSR row (`files.ts`) and the JSON
+ * poll endpoint (`api-files.ts`, fix pass 8 finding 3) so a delivery that transitions to
+ * `failed`/`unconfirmed` AFTER the sender already has the page open renders the same
+ * button a full page reload would have shown.
+ */
+export function canResendDelivery(outcome: DeliveryOutcome): boolean {
+  return outcome === 'failed' || outcome === 'unconfirmed';
+}
+
+/**
  * Fix pass 7 (critic-report.md Minor): the sender-facing "who received this" column for
  * one `deliveries` row. Two honest-but-not-a-real-address cases, both introduced by
  * migration 0006:

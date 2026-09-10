@@ -61,9 +61,27 @@ function mockTokenRefresh(mockAgent: MockAgent): void {
  * one exception, shared because literally every test needs OAuth. Individual tests
  * assert the upload's own `parent_id` against `TENANT_FOLDER_ID` (the id this mock
  * returns), never the raw `teamFolderId` config value directly.
+ *
+ * Fix pass 8 (code-review.md polish-pass finding 2): `ensureFolder` now looks up an
+ * existing folder by name (`GET /api/v1/files/<parentId>/files`) BEFORE ever creating
+ * one — every test exercising `upload()`/`ensureFolder` must mock that GET too, or
+ * `MockAgent.disableNetConnect()` throws "no matching interceptor". This helper mocks it
+ * as "nothing found" (so the existing create-path tests are unaffected); the
+ * lookup-hit/lookup-miss behavior itself gets its own dedicated tests below.
  */
 const TENANT_FOLDER_ID = 'tenant-folder-1';
+const TEAM_FOLDER_ID = 'team-folder-1';
+function mockFolderLookup(mockAgent: MockAgent, foundId?: string): void {
+  const pool = mockAgent.get(API_ORIGIN);
+  pool
+    .intercept({ path: pathnameIs(`/api/v1/files/${TEAM_FOLDER_ID}/files`), method: 'GET' })
+    .reply(200, {
+      data: foundId ? [{ id: foundId, attributes: { name: 'tenant-a', type: 'folder' } }] : [],
+    })
+    .persist();
+}
 function mockEnsureFolder(mockAgent: MockAgent): void {
+  mockFolderLookup(mockAgent);
   const pool = mockAgent.get(API_ORIGIN);
   pool
     .intercept({ path: pathnameIs('/api/v1/files'), method: 'POST' })
@@ -119,6 +137,7 @@ describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
     // directly (the other upload tests only assert the mocked response is used) and its
     // in-process cache — a second upload for the SAME `tenantFolder` must not repeat the
     // folder-create call at all.
+    mockFolderLookup(mockAgent); // nothing found -> falls through to create, below
     const pool = mockAgent.get(API_ORIGIN);
     let folderCalls = 0;
     let folderBody: unknown;
@@ -142,6 +161,53 @@ describe('ZohoFileStore (real adapter) — offline wire-shape tests', () => {
     expect(folderBody).toMatchObject({
       data: { type: 'files', attributes: { name: 'tenant-a', parent_id: 'team-folder-1' } },
     });
+  });
+
+  it('ensureFolder: looks up the tenant folder by name (GET /files/<parent>/files) before ever creating one', async () => {
+    // Fix pass 8 (code-review.md polish-pass finding 2): a lost `tenants.zoho_folder_id`
+    // row must not duplicate the tenant's real folder — `ensureFolder` tries a
+    // lookup-by-name first, and only creates when nothing matches.
+    let lookupCalls = 0;
+    let createCalls = 0;
+    const pool = mockAgent.get(API_ORIGIN);
+    pool
+      .intercept({ path: pathnameIs(`/api/v1/files/${TEAM_FOLDER_ID}/files`), method: 'GET' })
+      .reply(() => {
+        lookupCalls += 1;
+        return { statusCode: 200, data: {} }; // nothing found -> falls through to create
+      });
+    pool.intercept({ path: pathnameIs('/api/v1/files'), method: 'POST' }).reply(() => {
+      createCalls += 1;
+      return { statusCode: 200, data: { data: { id: TENANT_FOLDER_ID } } };
+    });
+
+    const folderId = await store.ensureFolder('tenant-a');
+
+    expect(folderId).toBe(TENANT_FOLDER_ID);
+    expect(lookupCalls).toBe(1);
+    expect(createCalls).toBe(1);
+  });
+
+  it('ensureFolder: reuses a folder found by name, without ever calling create', async () => {
+    let createCalls = 0;
+    const pool = mockAgent.get(API_ORIGIN);
+    pool
+      .intercept({ path: pathnameIs(`/api/v1/files/${TEAM_FOLDER_ID}/files`), method: 'GET' })
+      .reply(200, {
+        data: [
+          { id: 'other-folder', attributes: { name: 'someone-else', type: 'folder' } },
+          { id: TENANT_FOLDER_ID, attributes: { name: 'tenant-a', type: 'folder' } },
+        ],
+      });
+    pool.intercept({ path: pathnameIs('/api/v1/files'), method: 'POST' }).reply(() => {
+      createCalls += 1;
+      return { statusCode: 200, data: { data: { id: 'should-not-be-used' } } };
+    });
+
+    const folderId = await store.ensureFolder('tenant-a');
+
+    expect(folderId).toBe(TENANT_FOLDER_ID);
+    expect(createCalls).toBe(0);
   });
 
   it('upload (simple path): multipart POST to /upload with parent_id + streamed content field', async () => {

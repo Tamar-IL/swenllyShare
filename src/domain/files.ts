@@ -1,8 +1,9 @@
 import type { Readable } from 'node:stream';
-import { withTransaction, type Pool } from '../db/pool.js';
+import { withAdvisoryLock, withTransaction, type Pool } from '../db/pool.js';
 import { files, type FileRow, type AllowlistMode } from '../db/repositories/files.js';
 import { driveCopies } from '../db/repositories/drive-copies.js';
 import { jobs } from '../db/repositories/jobs.js';
+import { tenants } from '../db/repositories/tenants.js';
 import type { FileStorePort } from '../ports/file-store.js';
 import type { DriveSharePort } from '../ports/drive-share.js';
 import type { BlobStagingPort } from '../ports/blob-staging.js';
@@ -15,6 +16,12 @@ import type { SettingsService } from './settings.js';
 
 const REQUEST_TOKEN_BITS = 130;
 const PUBLIC_SLUG_BITS = 130;
+
+/** Fix pass 8 (code-review.md polish-pass finding 2) — see
+ * `FilesService.resolveTenantFolder`'s doc comment. Distinct from `sharing-engine.ts`'s
+ * `swenlly.share` namespace (`hashtext`-scoped, so a collision only serializes callers
+ * within the SAME namespace, never across the two). */
+const TENANT_FOLDER_LOCK_NAMESPACE = 'swenlly.tenant-folder';
 
 /** `type/subtype` per RFC 2045/6838's token grammar (`token = 1*<any CHAR except CTLs
  * or tspecials>`), restricted further to the lowercase-only characters this function
@@ -259,6 +266,14 @@ export class FilesService {
     // Step 1: Zoho chunked upload.
     let zohoResourceId = file.zoho_resource_id;
     if (!zohoResourceId) {
+      const tenant = await tenants.findById(this.pool, tenantId);
+      if (!tenant) throw new AppError(ErrorCode.NOT_FOUND, 404, `tenant ${tenantId} not found`);
+      await this.resolveTenantFolder(
+        tenantId,
+        tenant.zoho_folder_id,
+        'zoho_folder_id',
+        this.ports.fileStore,
+      );
       const stream = await this.ports.blobStaging.open(file.staging_blob_id);
       const result = await this.ports.fileStore.upload(
         tenantId,
@@ -289,6 +304,14 @@ export class FilesService {
       let driveFileId =
         copyRow.drive_file_id ?? (await this.ports.driveShare.findByIntent(intentKey))?.driveFileId;
       if (!driveFileId) {
+        const tenant = await tenants.findById(this.pool, tenantId);
+        if (!tenant) throw new AppError(ErrorCode.NOT_FOUND, 404, `tenant ${tenantId} not found`);
+        await this.resolveTenantFolder(
+          tenantId,
+          tenant.drive_folder_id,
+          'drive_folder_id',
+          this.ports.driveShare,
+        );
         const stream = await this.ports.blobStaging.open(file.staging_blob_id);
         const result = await this.ports.driveShare.uploadResumable(
           tenantId,
@@ -321,6 +344,61 @@ export class FilesService {
     file = await files.findById(this.pool, tenantId, fileId);
     if (!file) throw new Error(`file ${fileId} disappeared during publish`);
     return file;
+  }
+
+  /**
+   * Resolves (creating and persisting if necessary) a tenant's storage-folder id for one
+   * provider column (fix pass 8, code-review.md polish-pass finding 2). Mirrors
+   * `SharingEngine.provision`'s idiom (architecture.md §5): reserve/resolve under a
+   * Postgres advisory lock, so double-creation is excluded by construction rather than
+   * by hoping the adapter's own in-memory cache is warm — that cache is empty on every
+   * process restart, has no cross-process lock, and (before this fix) was the ONLY
+   * de-duplication mechanism, so a restart permanently forked a tenant's storage into one
+   * more folder every time (the exact bug this fix closes).
+   *
+   * `existingId` is passed in already (read by the caller just before this), so the
+   * common case — a tenant's second, third, ... file — is a single synchronous cache
+   * prime with no lock and no network call. Only a tenant's genuinely first upload
+   * (`existingId` still `null`) takes the `swenlly.tenant-folder` advisory lock, and even
+   * then re-reads the tenant row INSIDE the lock before calling `port.ensureFolder` — a
+   * concurrent resolver that already won the race and committed while this caller waited
+   * for the lock is discovered here and primes the cache with the WINNER's id instead of
+   * creating a second folder. Only the actual first resolver for a tenant ever calls
+   * `ensureFolder`; every other caller, in this process or any other (the lock is a DB
+   * advisory lock, not an in-memory mutex), is guaranteed to observe that write once it
+   * gets its turn.
+   */
+  private async resolveTenantFolder(
+    tenantId: string,
+    existingId: string | null,
+    column: 'zoho_folder_id' | 'drive_folder_id',
+    port: {
+      ensureFolder(tenantFolder: string): Promise<string>;
+      primeFolder(tenantFolder: string, folderId: string): void;
+    },
+  ): Promise<string> {
+    if (existingId) {
+      port.primeFolder(tenantId, existingId);
+      return existingId;
+    }
+    return withTransaction(this.pool, (client) =>
+      withAdvisoryLock(client, TENANT_FOLDER_LOCK_NAMESPACE, tenantId, async () => {
+        const fresh = await tenants.findById(client, tenantId);
+        if (!fresh) throw new AppError(ErrorCode.NOT_FOUND, 404, `tenant ${tenantId} not found`);
+        const already = column === 'zoho_folder_id' ? fresh.zoho_folder_id : fresh.drive_folder_id;
+        if (already) {
+          port.primeFolder(tenantId, already);
+          return already;
+        }
+        const folderId = await port.ensureFolder(tenantId);
+        await tenants.setFolderIds(
+          client,
+          tenantId,
+          column === 'zoho_folder_id' ? { zohoFolderId: folderId } : { driveFolderId: folderId },
+        );
+        return folderId;
+      }),
+    );
   }
 
   /** Delete = immediate revocation + blob/Drive/Zoho object cleanup (architecture.md §7).

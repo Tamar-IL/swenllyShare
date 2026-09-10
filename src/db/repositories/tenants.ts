@@ -4,6 +4,12 @@ export interface TenantRow {
   id: string;
   slug: string;
   email: string;
+  // Fix pass 8 (docs/reviews/code-review.md, polish-pass finding 2, migration 0007):
+  // persisted per-tenant storage-folder ids, nullable until `FilesService.publishFile`
+  // resolves-and-persists them under an advisory lock the first time they're needed —
+  // see that method's doc comment for the full "why".
+  zoho_folder_id: string | null;
+  drive_folder_id: string | null;
   created_at: Date;
 }
 
@@ -44,5 +50,36 @@ export const tenants = {
     const row = rows[0];
     if (!row) throw new Error('tenants.createIfNotExists: insert returned no row');
     return row;
+  },
+
+  /**
+   * Fix pass 8 (code-review.md polish-pass finding 2): persists whichever of
+   * `zohoFolderId`/`driveFolderId` is provided (either or both — an omitted field is
+   * left untouched, never overwritten with NULL). Called by `FilesService.publishFile`
+   * only while holding the `swenlly.tenant-folder` advisory lock on this tenant, so
+   * concurrent resolvers never race to write two different ids.
+   */
+  async setFolderIds(
+    db: Queryable,
+    tenantId: string,
+    patch: { zohoFolderId?: string; driveFolderId?: string },
+  ): Promise<TenantRow | undefined> {
+    const sets: string[] = [];
+    const values: unknown[] = [];
+    if (patch.zohoFolderId !== undefined) {
+      values.push(patch.zohoFolderId);
+      sets.push(`zoho_folder_id = $${values.length}`);
+    }
+    if (patch.driveFolderId !== undefined) {
+      values.push(patch.driveFolderId);
+      sets.push(`drive_folder_id = $${values.length}`);
+    }
+    if (sets.length === 0) return tenants.findById(db, tenantId);
+    values.push(tenantId);
+    const { rows } = await db.query<TenantRow>(
+      `UPDATE tenants SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *`,
+      values,
+    );
+    return rows[0];
   },
 };

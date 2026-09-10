@@ -9,6 +9,7 @@ import type { Readable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
 import { hasTestDatabase, testPool } from '../setup/db.js';
+import { killChildOnFailedReadiness } from './support/boot-process.js';
 
 /**
  * Bug 7 (docs/qa/qa-report-sender-app.md: "no browser harness") — the one real-Chromium,
@@ -133,19 +134,26 @@ async function bootApp(databaseUrl: string): Promise<AppHandle> {
     exited = { code };
   });
 
-  await waitForCondition(
-    async () => {
-      if (exited) {
-        throw new Error(`app process exited early (code ${exited.code}):\n${stdoutBuf}`);
-      }
-      try {
-        const res = await fetch(`${baseUrl}/healthz`);
-        return res.ok;
-      } catch {
-        return false;
-      }
-    },
-    { timeoutMs: 20_000, intervalMs: 200, message: `app to boot on ${baseUrl}` },
+  // Fix pass 8 (code-review.md polish-pass finding 4): a failed readiness wait (bad
+  // DATABASE_URL, port collision, a genuine boot regression) used to propagate straight
+  // out of `bootApp` with `child` never killed — this caller's `app = await
+  // bootApp(...)` in `beforeAll` then never completed, so no `AppHandle`/pid survived
+  // for `afterAll` to clean up, leaking the spawned process for the CI run's lifetime.
+  await killChildOnFailedReadiness(child, () =>
+    waitForCondition(
+      async () => {
+        if (exited) {
+          throw new Error(`app process exited early (code ${exited.code}):\n${stdoutBuf}`);
+        }
+        try {
+          const res = await fetch(`${baseUrl}/healthz`);
+          return res.ok;
+        } catch {
+          return false;
+        }
+      },
+      { timeoutMs: 20_000, intervalMs: 200, message: `app to boot on ${baseUrl}` },
+    ),
   );
 
   return {
@@ -226,10 +234,16 @@ describe.skipIf(!E2E)('E2E smoke — real browser, real server, real DB', () => 
     }, 30_000);
 
     afterAll(async () => {
-      await context?.close();
-      await browser?.close();
-      await app?.stop();
-      if (uploadDir) await rm(uploadDir, { recursive: true, force: true });
+      // Fix pass 8 (code-review.md polish-pass finding 4): each cleanup step is
+      // independent of the others' success — a plain sequential `await` chain meant one
+      // failing step (e.g. `context.close()` throwing) skipped every step after it,
+      // including `app?.stop()`, the ONE call that actually kills the spawned child
+      // process. `.catch()` on each keeps `app?.stop()` (and the temp-dir removal)
+      // reachable regardless of what happened earlier in this hook.
+      await context?.close().catch(() => {});
+      await browser?.close().catch(() => {});
+      await app?.stop().catch(() => {});
+      if (uploadDir) await rm(uploadDir, { recursive: true, force: true }).catch(() => {});
     });
 
     it('sign-in, upload, per-file page, copy, settings, deliveries, branded page', async () => {
@@ -351,6 +365,21 @@ describe.skipIf(!E2E)('E2E smoke — real browser, real server, real DB', () => 
       // still exactly one (this is precisely the shape of QA report Bug 1).
       await sleep(11_000);
       expect(await page.locator('#deliveries-tbody tr').count()).toBe(1);
+
+      // --- Resend button appears on a row that only ever arrived via polling (fix pass
+      // 8, code-review.md polish-pass finding 3) --------------------------------------
+      await testPool().query(
+        `INSERT INTO deliveries (tenant_id, file_id, requester_address, mechanism, outcome)
+           VALUES ($1, $2, 'failed-requester@example.com', 'attachment', 'failed')`,
+        [fileRow!.tenant_id, fileId],
+      );
+      await waitForCondition(
+        async () => (await page.locator('#deliveries-tbody tr').count()) === 2,
+        { timeoutMs: 8_000, intervalMs: 500, message: 'the seeded failed delivery to appear' },
+      );
+      const resendForms = page.locator('#deliveries-tbody form[action*="/deliveries/"]');
+      await expect.poll(() => resendForms.count()).toBe(1);
+      expect(await resendForms.first().getAttribute('action')).toMatch(/\/deliveries\/.+\/resend$/);
 
       // --- Branded page: "Swenlly" present, raw Zoho link never leaked -------------
       const sharePage = await context.newPage();
