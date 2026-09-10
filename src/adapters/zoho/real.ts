@@ -471,6 +471,10 @@ export class ZohoFileStore implements FileStorePort {
     this.tenantFolderCache.set(name, folderId);
   }
 
+  forgetFolder(tenantFolder: string): void {
+    this.tenantFolderCache.delete(tenantFolder);
+  }
+
   /** @unverified-live */
   async upload(
     tenantFolder: string,

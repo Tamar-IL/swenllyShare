@@ -149,7 +149,7 @@
         </label>
         <label class="radio-option">
           <input type="radio" name="expiryMode" value="days" <%= it.file.expiryMode === 'days' ? 'checked' : '' %> />
-          בעוד <input class="input input--inline" type="number" name="expiryDays" min="1" value="<%= it.file.expiryDays %>" /> ימים
+          בעוד <input class="input input--inline" type="number" name="expiryDays" min="1" value="<%= it.file.expiryDays %>" /> ימים<% if (it.file.expiresAtIso) { %> <span class="muted" data-expiry-date>(פג ב-<span class="ltr-token" dir="ltr"><%= it.file.expiresAtIso %></span>)</span><% } %>
         </label>
         <label class="radio-option">
           <input type="radio" name="expiryMode" value="custom" <%= it.file.expiryMode === 'custom' ? 'checked' : '' %> />

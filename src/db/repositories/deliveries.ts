@@ -302,6 +302,31 @@ export const deliveries = {
    * migration 0006, so concurrent over-cap requests in the same hour never race a
    * read-then-write and never create a second row for the same hour.
    */
+  /**
+   * Fix pass 10 (critic N-12): one aggregated `rate_limited` row per (file, requester,
+   * calendar hour) for refused resends, mirroring `incrementSuppressed` — the sender's
+   * audit feed shows "N resend attempts refused" instead of one row per click.
+   */
+  async incrementRateLimitedResend(
+    db: Queryable,
+    tenantId: string,
+    fileId: string,
+    requesterAddress: string,
+  ): Promise<DeliveryRow> {
+    const { rows } = await db.query<DeliveryRow>(
+      `INSERT INTO deliveries (tenant_id, file_id, requester_address, outcome, reason, suppressed_count, completed_at)
+       VALUES ($1, $2, $3, 'rate_limited', 'resend_rate_limited', 1, now())
+       ON CONFLICT (file_id, requester_address, date_trunc('hour', created_at AT TIME ZONE 'UTC'))
+         WHERE reason = 'resend_rate_limited' AND outcome = 'rate_limited'
+       DO UPDATE SET suppressed_count = deliveries.suppressed_count + 1, completed_at = now()
+       RETURNING *`,
+      [tenantId, fileId, requesterAddress],
+    );
+    const row = rows[0];
+    if (!row) throw new Error('deliveries.incrementRateLimitedResend: upsert returned no row');
+    return row;
+  },
+
   async incrementSuppressed(db: Queryable, tenantId: string, fileId: string): Promise<DeliveryRow> {
     const { rows } = await db.query<DeliveryRow>(
       `INSERT INTO deliveries (tenant_id, file_id, requester_address, outcome, reason, suppressed_count, completed_at)

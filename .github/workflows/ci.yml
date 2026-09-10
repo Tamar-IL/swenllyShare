@@ -82,11 +82,8 @@ jobs:
         if: always()
         run: scripts/dev-db.sh stop
 
-      # placeholder today — it only prints "not implemented" and always exits 0.
-      # Once it actually diffs docs/verification-ledger.md against the
-      # @unverified-live / @verified-live(date) markers in src/adapters/**
-      # (architecture.md §9), drop `continue-on-error` here so a stale ledger
-      # fails the build as intended.
+      # docs/verification-ledger.md must match the @unverified-live / @verified-live(date)
+      # markers in src/adapters/**/real.ts; drift fails the build (architecture.md §9).
       - name: Verification ledger check
         run: pnpm gen:ledger -- --check
 

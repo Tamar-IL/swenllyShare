@@ -71,6 +71,10 @@ export class FakeDriveShare implements DriveSharePort {
     this.folders.set(name, folderId);
   }
 
+  forgetFolder(name: string): void {
+    this.folders.delete(name);
+  }
+
   /** Test inspection: which cached folder id a Drive file currently lives under. */
   folderIdOf(driveFileId: string): string | undefined {
     return this.files.get(driveFileId)?.folderId;

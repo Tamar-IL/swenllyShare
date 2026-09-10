@@ -1,11 +1,16 @@
 import type { FastifyInstance } from 'fastify';
 import type { Container } from '../../container.js';
 import { requireSessionApi } from '../plugins/auth.js';
+import { requireUuidParams } from '../plugins/uuid-params.js';
 import { AppError, ErrorCode } from '../../lib/errors.js';
 import { deliveryAddressLabel, canResendDelivery } from '../../lib/presentation.js';
 
 /** `POST /api/files` (streamed multipart upload) and the file-status/deliveries JSON
  * endpoints (architecture.md §6, §11). */
+const uuidIdJson = requireUuidParams(['id'], (reply) => {
+  reply.code(404).send({ error: ErrorCode.NOT_FOUND });
+});
+
 export function registerApiFileRoutes(app: FastifyInstance, container: Container): void {
   app.post(
     '/api/files',
@@ -46,7 +51,7 @@ export function registerApiFileRoutes(app: FastifyInstance, container: Container
 
   app.get<{ Params: { id: string } }>(
     '/api/files/:id/status',
-    { preHandler: requireSessionApi },
+    { preHandler: [requireSessionApi, uuidIdJson] },
     async (request, reply) => {
       if (!request.tenantId) return;
       const status = await container.services.files.getStatus(request.tenantId, request.params.id);
@@ -60,7 +65,7 @@ export function registerApiFileRoutes(app: FastifyInstance, container: Container
 
   app.get<{ Params: { id: string }; Querystring: { since?: string; sinceId?: string } }>(
     '/api/files/:id/deliveries',
-    { preHandler: requireSessionApi },
+    { preHandler: [requireSessionApi, uuidIdJson] },
     async (request, _reply) => {
       if (!request.tenantId) return;
       const since = request.query.since ? new Date(request.query.since) : undefined;

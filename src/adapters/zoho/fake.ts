@@ -70,6 +70,10 @@ export class FakeFileStore implements FileStorePort {
   primeFolder(name: string, folderId: string): void {
     this.folders.set(name, folderId);
   }
+
+  forgetFolder(name: string): void {
+    this.folders.delete(name);
+  }
   /** Fix pass 5, F-E test seam: forces the NEXT `createPublicLink` call to return
    * `embedToken: null`, the same shape the real adapter returns whenever Zoho's response
    * carries no `embed_url`/`embed_link` field — lets tests exercise the branded page's

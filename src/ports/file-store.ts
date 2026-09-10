@@ -34,6 +34,9 @@ export interface FileStorePort {
    * cache, as the source of truth across a restart (fix pass 8, finding 2).
    */
   primeFolder(tenantFolder: string, folderId: string): void;
+  /** Fix pass 10 (critic N-13): drop a cached folder id the provider reported as gone,
+   * so the next `ensureFolder` looks up / re-creates instead of targeting a dead id. */
+  forgetFolder(tenantFolder: string): void;
 
   /**
    * Creates (or returns the existing) public link for `resourceId`. `embedToken` is

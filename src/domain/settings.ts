@@ -135,20 +135,17 @@ export class SettingsService {
       }
       patch.customMessage = cleaned;
     }
-    if (input.expiryMode !== undefined) {
-      patch.expiresAt = this.resolveExpiry(
-        input.expiryMode,
-        { days: input.expiryDays, expiresAt: input.expiresAt },
-        clock,
-      );
-      // Fix pass 7 (critic-report.md Minor): persist the FORM's own choice alongside the
-      // derived `expires_at` timestamp (migration 0006) — `resolveExpiry` above already
-      // validated it (throws before this point on a bad `days`/missing `expiresAt`), so
-      // this mirrors exactly what was just computed, never a second, divergent decision.
-      patch.expiryMode = input.expiryMode;
-      patch.expiryDays =
-        input.expiryMode === 'days' ? (input.expiryDays ?? this.config.DEFAULT_EXPIRY_DAYS) : null;
-    }
+    // Validate the expiry submission up front (throws on a bad `days` / missing
+    // `expiresAt`); whether it is APPLIED is decided inside the transaction, below, against
+    // the stored row (fix pass 10, critic N-11).
+    const resolvedExpiry =
+      input.expiryMode !== undefined
+        ? this.resolveExpiry(
+            input.expiryMode,
+            { days: input.expiryDays, expiresAt: input.expiresAt },
+            clock,
+          )
+        : undefined;
     if (input.allowlistMode !== undefined) patch.allowlistMode = input.allowlistMode;
 
     // Validate the whole submission up front — nothing below this point can throw for a
@@ -163,6 +160,32 @@ export class SettingsService {
         : undefined;
 
     return withTransaction(this.pool, async (client) => {
+      if (input.expiryMode !== undefined) {
+        const current = await files.findById(client, tenantId, fileId);
+        if (!current) throw new AppError(ErrorCode.NOT_FOUND, 404, 'file not found');
+        const days =
+          input.expiryMode === 'days'
+            ? (input.expiryDays ?? this.config.DEFAULT_EXPIRY_DAYS)
+            : null;
+        // Fix pass 10 (critic N-11): `days` mode used to be re-issued from NOW on every
+        // save, so renaming a file silently EXTENDED its expiry — a safety invariant
+        // moving in the looser direction with no user intent. The stored timestamp is kept
+        // whenever the sender did not change the expiry control: same mode, same day
+        // count, and an expiry already set. Every other case (mode changed, count
+        // changed, or no expiry yet) applies the freshly resolved value.
+        const unchangedDaysMode =
+          input.expiryMode === 'days' &&
+          current.expiry_mode === 'days' &&
+          current.expiry_days === days &&
+          current.expires_at !== null;
+        if (!unchangedDaysMode) {
+          patch.expiresAt = resolvedExpiry;
+        }
+        // Fix pass 7 (critic-report.md Minor): persist the FORM's own choice alongside the
+        // derived timestamp (migration 0006).
+        patch.expiryMode = input.expiryMode;
+        patch.expiryDays = days;
+      }
       const updated = await files.updateSettings(client, tenantId, fileId, patch);
       if (!updated) {
         throw new AppError(ErrorCode.NOT_FOUND, 404, 'file not found');

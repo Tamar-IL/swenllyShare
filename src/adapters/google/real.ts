@@ -358,6 +358,10 @@ export class GoogleDriveShare implements DriveSharePort {
     this.tenantFolderCache.set(tenantFolder, folderId);
   }
 
+  forgetFolder(tenantFolder: string): void {
+    this.tenantFolderCache.delete(tenantFolder);
+  }
+
   private async initiateResumableSession(
     tenantFolder: string,
     name: string,

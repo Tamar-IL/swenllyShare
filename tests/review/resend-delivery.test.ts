@@ -277,7 +277,7 @@ describe.skipIf(!hasTestDatabase())('resend delivery', () => {
     const rows = await deliveries.listForFile(container.pool, tenant.id, file.id, { limit: 20 });
     const rateLimitedRow = rows.find((r) => r.outcome === 'rate_limited');
     expect(rateLimitedRow).toBeDefined();
-    expect(rateLimitedRow?.reason).toBe('resend');
+    expect(rateLimitedRow?.reason).toBe('resend_rate_limited'); // fix pass 10 (N-12): aggregated per file/requester/hour
     expect(rateLimitedRow?.requester_address).toBe(requesterAddress);
   });
 

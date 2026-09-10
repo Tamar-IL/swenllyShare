@@ -2166,3 +2166,24 @@ the page never shows you the actual date, so nothing on screen tells you it move
 promise to the person you sent the file to, and this makes that promise longer without you asking —
 so it needs the same small fix R-1 got before a customer touches that form, though it does not hold
 up the live spikes at all.
+
+
+---
+
+## Fix pass 10 status (orchestrator, 2026-09-10) — response to the fifth pass
+
+- **N-11 — fixed.** `SettingsService.updateSettings` decides inside the transaction, against the
+  stored row: same mode (`days`), same day count, expiry already set ⇒ `expires_at` is left
+  byte-identical; any actual change to the control (mode or count) applies the freshly resolved
+  value. The per-file page now renders the resulting date next to the day count. Test:
+  `tests/review/fix-pass-10.test.ts` (25 virtual days, rename only ⇒ identical timestamp; change
+  the count ⇒ re-issued).
+- **N-12 — fixed.** Refused resends upsert one aggregated `rate_limited` row per (file,
+  requester, hour) with `suppressed_count` (migration 0009, partial unique index), mirroring F-7.
+  Test: 30 refused clicks ⇒ 1 row.
+- **R-5 — fixed.** `requireUuidParams` preHandler on every `:id`/`:deliveryId` route (HTML and
+  JSON) returns the same 404 a foreign tenant's id gets. Test: six routes.
+- **N-13 — fixed.** `forgetFolder` on both ports; a `NotFoundError` from an upload clears the
+  cached and persisted folder id and rethrows so the retry re-creates it; the stale CI comment is
+  gone; spike 1 now records what a dead `parent_id` returns. Test: dead-folder round trip.
+- **R-4 residual — fixed.** ADR 21 documents the resend action.

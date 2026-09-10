@@ -62,7 +62,7 @@ export const tenants = {
   async setFolderIds(
     db: Queryable,
     tenantId: string,
-    patch: { zohoFolderId?: string; driveFolderId?: string },
+    patch: { zohoFolderId?: string | null; driveFolderId?: string | null },
   ): Promise<TenantRow | undefined> {
     const sets: string[] = [];
     const values: unknown[] = [];

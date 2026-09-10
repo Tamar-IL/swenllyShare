@@ -214,3 +214,17 @@ mechanical and can be done one repository at a time if the surface grows.
 **Decision:** `eta` — actively released, ships its own types, autoescapes by default.
 **Consequence:** Nunjucks 3.2.4 (2023, needs `@types/nunjucks`) would have bought nothing for this
 surface; `eta`'s `layout()` covers the single shell this product needs.
+
+### 21. Resend action: same gates as an inbound request, at most one in flight
+**Context:** the critic (N-2) asked for a way to recover a `failed`/`unconfirmed` delivery; a
+resend is a new way to make the system send a file, so it is an attack surface (R-2: 60 mails to
+one address in an hour, 12 clicks → 12 copies).
+**Decision:** `POST /files/:id/deliveries/:deliveryId/resend` (session + CSRF, tenant-scoped) is
+eligible only for `failed`/`unconfirmed` rows, runs the SAME `checkInboundRequest` rate gates as a
+webhook request (requester, domain, file, tenant) plus a per-(file, requester) resend bucket, and
+creates the new `deliveries` row with `ON CONFLICT DO NOTHING` against a partial unique index over
+in-flight resend rows (migration 0008) — a race decided by the database, not by a read-then-insert.
+The new job re-runs expiry/status/allowlist before sending.
+**Consequence:** resend can never amplify past what the requester could have triggered by email,
+and concurrent clicks yield exactly one delivery. Refused resends are audited (aggregated per
+file/requester/hour, N-12).

@@ -252,6 +252,13 @@ LIVE_MAILGUN=1 LIVE_MAILGUN_TEST_RECIPIENT=you@example.com \
 LIVE_MAILGUN=1 pnpm test:integration tests/contract/inbound-mail.test.ts
 ```
 
+**Spike 1 extra (critic N-13):** after a successful upload, trash the tenant's folder in the
+WorkDrive UI, then upload again for that tenant. Record what the API returns for a dead
+`parent_id` (status + error code). The publish step clears the persisted folder id on a
+`NotFoundError` from the upload and re-creates the folder on the retry — confirm that is the
+error class Zoho actually returns; if it returns something else, add it to
+`src/adapters/zoho/real.ts`'s classification.
+
 **What counts as pass for 3a:** the `OutboundMailPort contract: real` block isn't skipped,
 both its tests pass, and the email you designated actually arrives with the expected subject/
 body/attachment.

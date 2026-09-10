@@ -45,3 +45,7 @@ Three lines per chunk, newest last. Live external calls made so far: **0**.
 - Closed every carried Minor/N-* item: quarantine suppression rows, null requester on unparseable From, pino logger everywhere, N-3, expiry-mode fidelity + 0007 backfill, per-tenant folders persisted under a lock, resend action (same rate gates as inbound + race-safe in-flight guard, 0008), N-8, browser e2e smoke in CI, per-run isolated test DB, CI ledger check now blocking.
 - Code review + critic fourth pass on the polish diff: 4 review findings and R-1/R-2 fixed the same day.
 - Suite: 388 tests + 1 e2e green, 7 live-gated skips; ledger 0 verified-live / 18 unverified-live. Live external calls: **0**.
+
+## 2026-09-10 — Critic fifth pass (SHIP-READY) → fix pass 10 (green)
+- Fifth pass confirmed R-1/R-2 closed but found N-11: a rename re-issued a days-mode expiry from now. Fixed (unchanged control ⇒ timestamp kept; date now shown next to the control), plus N-12 (aggregated refused-resend rows, 0009), R-5 (malformed ids ⇒ 404), N-13 (dead folder id self-heals; spike-1 record item), ADR 21.
+- Suite: 392 tests + 1 e2e green, 7 live-gated skips. Live external calls: **0**.

@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Container } from '../../container.js';
 import { requireSessionHtml } from '../plugins/auth.js';
+import { requireUuidParams } from '../plugins/uuid-params.js';
 import { issueCsrfToken } from '../plugins/csrf.js';
 import { AppError, ErrorCode } from '../../lib/errors.js';
 import { buildRequestAddress } from '../../lib/addressing.js';
@@ -46,6 +47,10 @@ async function renderNotFound(reply: FastifyReply): Promise<void> {
   reply.code(404);
   await reply.view('error.eta', { title: 'שגיאה', message: 'הקובץ לא נמצא.' });
 }
+
+// Fix pass 10 (critic R-5): a malformed id gets the same 404 as a foreign tenant's id.
+const uuidId = requireUuidParams(['id'], renderNotFound);
+const uuidIdAndDelivery = requireUuidParams(['id', 'deliveryId'], renderNotFound);
 
 /** Tenant-scoped file pages: list, per-file detail/settings, delete
  * (architecture.md §11). Every lookup goes through the tenant-scoped repository, so a
@@ -99,7 +104,7 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
 
   app.get<{ Params: { id: string }; Querystring: { flash?: string } }>(
     '/files/:id',
-    { preHandler: requireSessionHtml },
+    { preHandler: [requireSessionHtml, uuidId] },
     async (request, reply) => {
       if (!request.tenantId) return;
       const file = await container.services.files.getById(request.tenantId, request.params.id);
@@ -183,7 +188,7 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
 
   app.post<{ Params: { id: string }; Body: SettingsBody }>(
     '/files/:id/settings',
-    { preValidation: app.csrfProtection, preHandler: requireSessionHtml },
+    { preValidation: app.csrfProtection, preHandler: [requireSessionHtml, uuidId] },
     async (request: FastifyRequest<{ Params: { id: string }; Body: SettingsBody }>, reply) => {
       if (!request.tenantId) return;
       const body = request.body ?? {};
@@ -237,7 +242,7 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
 
   app.post<{ Params: { id: string } }>(
     '/files/:id/delete',
-    { preValidation: app.csrfProtection, preHandler: requireSessionHtml },
+    { preValidation: app.csrfProtection, preHandler: [requireSessionHtml, uuidId] },
     async (request, reply) => {
       if (!request.tenantId) return;
       // Bug 2 (QA report): match the 404 contract every other tenant-scoped route in this
@@ -263,7 +268,7 @@ export function registerFileRoutes(app: FastifyInstance, container: Container): 
    */
   app.post<{ Params: { id: string; deliveryId: string } }>(
     '/files/:id/deliveries/:deliveryId/resend',
-    { preValidation: app.csrfProtection, preHandler: requireSessionHtml },
+    { preValidation: app.csrfProtection, preHandler: [requireSessionHtml, uuidIdAndDelivery] },
     async (request, reply) => {
       if (!request.tenantId) return;
       const result = await container.services.audit.resendDelivery(

@@ -11,6 +11,7 @@ import type { TokenGen } from '../ports/token-gen.js';
 import type { Clock } from '../ports/clock.js';
 import type { Logger } from '../logger.js';
 import { AppError, ErrorCode } from '../lib/errors.js';
+import { NotFoundError } from '../ports/errors.js';
 import { limitStream, PayloadTooLargeError } from '../lib/byte-limit.js';
 import type { SettingsService } from './settings.js';
 
@@ -275,11 +276,12 @@ export class FilesService {
         this.ports.fileStore,
       );
       const stream = await this.ports.blobStaging.open(file.staging_blob_id);
-      const result = await this.ports.fileStore.upload(
+      const { size_bytes: sizeBytes, display_name: displayName } = file;
+      const result = await this.healDeadFolderOn(
         tenantId,
-        stream,
-        Number(file.size_bytes),
-        file.display_name,
+        'zoho_folder_id',
+        this.ports.fileStore,
+        () => this.ports.fileStore.upload(tenantId, stream, Number(sizeBytes), displayName),
       );
       zohoResourceId = result.resourceId;
       await files.setPublishStep(this.pool, tenantId, fileId, { zohoResourceId });
@@ -313,12 +315,19 @@ export class FilesService {
           this.ports.driveShare,
         );
         const stream = await this.ports.blobStaging.open(file.staging_blob_id);
-        const result = await this.ports.driveShare.uploadResumable(
+        const { size_bytes: sizeBytes, display_name: displayName, mime } = file;
+        const result = await this.healDeadFolderOn(
           tenantId,
-          stream,
-          Number(file.size_bytes),
-          file.display_name,
-          file.mime,
+          'drive_folder_id',
+          this.ports.driveShare,
+          () =>
+            this.ports.driveShare.uploadResumable(
+              tenantId,
+              stream,
+              Number(sizeBytes),
+              displayName,
+              mime,
+            ),
         );
         driveFileId = result.driveFileId;
       }
@@ -368,6 +377,40 @@ export class FilesService {
    * advisory lock, not an in-memory mutex), is guaranteed to observe that write once it
    * gets its turn.
    */
+  /**
+   * Fix pass 10 (critic N-13): a persisted folder id had no self-heal — if the provider-side
+   * folder is trashed or moved, every upload for that tenant would target a dead id forever,
+   * because the cache hit short-circuits `ensureFolder`'s lookup-by-name. On a
+   * `NotFoundError` from the upload we forget the cached id, null the persisted column, and
+   * rethrow so the job's own retry runs `resolveTenantFolder` again and re-creates (or
+   * re-finds) the folder. Whether the provider really reports a dead `parent_id` as this
+   * error class is a spike-1 record item (`docs/runbooks/live-spikes.md`).
+   */
+  private async healDeadFolderOn<T>(
+    tenantId: string,
+    column: 'zoho_folder_id' | 'drive_folder_id',
+    port: { forgetFolder(tenantFolder: string): void },
+    call: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await call();
+    } catch (err) {
+      if (err instanceof NotFoundError) {
+        port.forgetFolder(tenantId);
+        await tenants.setFolderIds(
+          this.pool,
+          tenantId,
+          column === 'zoho_folder_id' ? { zohoFolderId: null } : { driveFolderId: null },
+        );
+        this.ports.logger.warn(
+          { tenantId, column },
+          'file.publish: provider reported the tenant folder missing; cleared the persisted id, retry will re-create it',
+        );
+      }
+      throw err;
+    }
+  }
+
   private async resolveTenantFolder(
     tenantId: string,
     existingId: string | null,

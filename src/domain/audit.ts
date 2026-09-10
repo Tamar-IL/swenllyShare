@@ -93,14 +93,9 @@ export class AuditService {
 
     const limited = await this.rateLimit.checkResend({ requesterAddress, fileId, tenantId });
     if (limited) {
-      await deliveries.insertTerminal(this.pool, {
-        tenantId,
-        fileId,
-        requesterAddress,
-        outcome: 'rate_limited',
-        reason: 'resend',
-        dmarc: original.dmarc,
-      });
+      // Fix pass 10 (critic N-12): one aggregated row per (file, requester, hour), not one
+      // per click — mirrors F-7's suppression aggregate on the inbound path.
+      await deliveries.incrementRateLimitedResend(this.pool, tenantId, fileId, requesterAddress);
       return { status: 'rate_limited' };
     }
 

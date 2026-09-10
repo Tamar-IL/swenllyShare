@@ -23,6 +23,7 @@ describe.skipIf(!hasTestDatabase())('migrate (idempotency)', () => {
       '0006_quarantine_suppression_and_expiry_mode.sql',
       '0007_expiry_mode_backfill_and_tenant_folders.sql',
       '0008_resend_in_flight_guard.sql',
+      '0009_resend_rate_limited_aggregate.sql',
     ]);
   });
 
