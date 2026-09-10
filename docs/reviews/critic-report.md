@@ -2187,3 +2187,181 @@ up the live spikes at all.
   cached and persisted folder id and rethrows so the retry re-creates it; the stale CI comment is
   gone; spike 1 now records what a dead `parent_id` returns. Test: dead-folder round trip.
 - **R-4 residual — fixed.** ADR 21 documents the resend action.
+
+---
+
+## Sixth pass — 2026-09-10 (Critic)
+
+**Verdict: SHIP-READY-FOR-LIVE-SPIKES.** No fatal issues, no serious issues. Every finding
+from the fifth pass (N-11, N-12, N-13, R-5, R-4-residual) is closed, and each was re-proven
+by a fresh adversarial probe rather than by reading the fix pass's own test. Three new
+findings, all **Minor**; none blocks the live spikes and none is a safety regression.
+
+Scope of this pass: re-run CP-6/CP-7/CP-8 and the dead-folder self-heal against HEAD, plus
+the edge cases the N-11 fix could plausibly have missed. Probes were throwaway
+(`tests/review/zz-critic-probe{6,7,8}.test.ts`), run against a real Postgres, and deleted;
+no `src/**` file was touched. Full suite re-run at the end: **392 passed / 7 skipped / 70
+files**, e2e **1 passed** — the founder-facing ledger is accurate.
+
+### N-11 — CLOSED (was serious)
+
+Re-run of CP-6 the hard way: through the **real settings route**, submitting the values
+**scraped out of the actually-rendered form**, not values a test author chose.
+
+- File starts `expiry_mode=days`, `expiry_days=30`, `expires_at=2026-10-10T06:08:53.009Z`.
+- Clock advances **25 virtual days**.
+- The rendered form yields exactly
+  `{displayName:"doc.pdf", expiryMode:"days", expiryDays:"30", expiresAt:"2026-10-10", customMessage:"", allowlist:""}`
+  — i.e. the form still re-submits the pre-filled control, which was the mechanism of the bug.
+- Only `displayName` is changed; `POST /files/:id/settings` → 302.
+- After: `renamed-via-route.pdf`, `days`, `30`, **`expires_at = 2026-10-10T06:08:53.009Z`** —
+  byte-identical. The 25 days were not given back.
+
+The fix is in the right place: the decision is made *inside the transaction against the
+stored row* (`SettingsService.updateSettings`), not in the route and not against the
+request's clock, so it holds for the JSON path and any future caller too.
+
+Edge cases probed, all correct:
+
+| Case | Expected | Observed |
+|---|---|---|
+| `none` → `days` on a file with **no** expiry | apply `now + N` | applied exactly |
+| `custom` → `days` | apply `now + N` | applied exactly |
+| day count changed (30 → 10, 7 → 8) | apply `now + N` | applied exactly |
+| same count re-submitted after 5 more days | frozen | frozen |
+
+**The rendered date now matches the stored value.** The probe asserted it rather than
+eyeballing it: the `data-expiry-date` span next to the day count read `2026-10-10`, equal to
+`expires_at`'s own UTC date. That was the second half of the fifth-pass lesson (a form must
+not submit a control whose effective value the page never showed), and it is genuinely done.
+
+### N-12 — CLOSED (was minor)
+
+CP-7 at 200 clicks, `RATE_REQUESTER_PER_HOUR=1`:
+
+- 200 calls → `ok: 1`, `rate_limited: 199`.
+- Delivery rows for the file: **3** — the original `failed`, the one accepted `queued`
+  resend, one `rate_limited` aggregate with `suppressed_count = 199`.
+- 50 more clicks later: still **3** rows, `suppressed_count = 249`. Accounting is exact:
+  249 suppressed + 1 accepted = 250 clicks, nothing lost, nothing double-counted.
+
+Honest limit of this probe: the hour-boundary half is **inconclusive under the fake clock** —
+`rate_limit_counters` and `deliveries.created_at` both use Postgres `now()`, which
+`FakeClock.advance()` cannot move, so my "next hour" clicks landed in the same real hour. The
+bound is nonetheless correct *by construction*: the partial unique index keys on
+`date_trunc('hour', created_at AT TIME ZONE 'UTC')`, so the worst case is one row per (file,
+requester, hour) — 24 rows/day for a requester hammering continuously, versus the unbounded
+row-per-click it replaced. `created_at` staying at the hour's first refusal while
+`completed_at` advances is the right shape for an hourly aggregate.
+
+### R-5 — CLOSED (was minor)
+
+CP-8 widened: **12 malformed id shapes × 6 tenant-scoped routes = 72 requests**
+(`not-a-uuid`, empty, `..`, `%2e%2e%2f`, a SQL-injection string, a truncated UUID, a
+UUID-with-`zz`, 4 KB of `x`, the nil UUID, `%00`, `null`, a JNDI lookup string).
+
+- Status histogram: `404 × 64`, `414 × 6`, `302 × 1`, `200 × 1`. **Zero 5xx.**
+- The `414`s are the 4 KB path hitting Fastify's URL cap — refused before routing, correct.
+- The `302` is `GET /files/..` → `/files`, the router's own path normalization to a
+  session-protected page. `/files/../settings`, `/api/files/../status` and
+  `/files/%2e%2e/delete` all 404. No traversal, no privilege gain.
+- **Indistinguishability holds byte-for-byte**: `GET /files/not-a-uuid` and `GET
+  /files/<another tenant's real file id>` return identical status *and* identical body; the
+  JSON pair are both `{"error":"not_found"}`. A malformed id is not an oracle.
+- The tenant's own file still renders 200 and is unmodified afterwards.
+
+The remaining `200` is new finding **N-15**, below.
+
+### N-13 — CLOSED (was minor)
+
+Dead-folder self-heal, re-run independently on **both** ports (the fix-pass-10 test only
+covers Zoho):
+
+| Arm | Persisted before | After one `NotFoundError` | After retry |
+|---|---|---|---|
+| Zoho | `zoho-folder-13` | `zoho_folder_id = NULL`, `drive_folder_id` **untouched** | `zoho-folder-17`, file `ready` |
+| Drive | `drive-folder-1` | `drive_folder_id = NULL`, `zoho_folder_id` **untouched** | re-created, file `ready` |
+
+No collateral clearing of the sibling port's id, and exactly **1** `drive_copies` row for the
+file afterwards — the heal does not orphan a copy. I also checked the third place a dead
+folder could bite: `SharingEngine.provision`'s duplicate path calls `driveShare.copy()`, which
+sets no `parents` (the copy inherits the source's folder), so it has no tenant-folder
+dependency to heal. N-13's two call sites are complete coverage, not two of three.
+
+### R-4 residual — CLOSED
+
+ADR 21 documents the resend action. Nothing further to attack here.
+
+### New findings (all Minor)
+
+**N-14 — a `custom`-mode expiry loses its time-of-day on any settings save.**
+The N-11 fix is asymmetric: it freezes `days` mode but leaves `custom` mode re-derived on
+every submit. The page renders `expires_at.toISOString().slice(0,10)` into a `type="date"`
+input, and the route parses it back with `new Date("YYYY-MM-DD")` — UTC midnight. Measured on
+a real round trip: `2026-10-20T06:08:53.364Z` → `2026-10-20T00:00:00.000Z`, **delta
+−22,133,364 ms**. Direction is provably always ≤ (truncation to the stored value's own UTC
+day), so it can only *shorten* an expiry, never extend one — it does not violate the
+"stricter only" rule and it is idempotent after the first save. Blast radius: rows that are in
+`custom` mode *and* carry a nonzero time-of-day, which is exactly the set migration 0007
+backfills — i.e. any database created between 0006 and 0007. On a fresh deploy the set is
+empty, because a sender-chosen custom date is already stored at UTC midnight. Fix is the same
+shape as N-11's: keep the stored timestamp when the submitted date equals the stored value's
+UTC date. Worth doing before a customer edits a backfilled file; not worth holding the spikes.
+
+**N-15 — `GET /api/files/:id/deliveries` never establishes file ownership.**
+Unlike its sibling `/status`, the poll endpoint does not look the file up; it goes straight to
+the tenant-scoped delivery query. Measured: own file, another tenant's file, and the nil UUID
+all return `200 {"items":[],"total":0}` — identical, so there is **no oracle and no leak
+today**, and the polling island still learns about deletion from `/status` (which correctly
+returns `{"status":"deleted"}`). The risk is forward-looking: the ownership check is the
+invariant that makes this payload safe, and it currently lives only in the repository query.
+The day someone adds a field to this response that is not tenant-scoped, the missing check
+becomes the leak. One `files.findById` → 404 makes it structural instead of incidental.
+
+**N-16 — nothing at the database level pairs `expiry_mode='days'` with a non-null
+`expiry_days`.** I probed the state the N-11 guard depends on: with `expiry_days` forced to
+`NULL` while `expiry_mode='days'`, a rename **extends the expiry again** (`2026-09-23` →
+`2026-10-02`), because `current.expiry_days === days` is false and the guard falls through to
+"apply the fresh value". A query of `pg_constraint` returns **no** CHECK mentioning
+`expiry_days`. The state is unreachable through current code (`createStaged` writes both
+columns; `updateSettings` coalesces to `DEFAULT_EXPIRY_DAYS`), so this is latent, not live —
+but N-11 was *itself* a bug in this exact column pair, and the fix's correctness now rests on
+a convention rather than a constraint. `CHECK (expiry_mode <> 'days' OR expiry_days IS NOT
+NULL)` in the next migration turns the convention into an invariant, and matches how 0006/0007
+already treat this pair.
+
+### What is genuinely good in this pass
+
+- **The N-11 fix was made where it cannot be bypassed.** Deciding inside the transaction,
+  against the row that is about to be written, means the guard holds for the HTML route, the
+  service, and any caller not yet written. The easy version — comparing in the route handler —
+  would have passed the same test and protected one path.
+- **Rendering the resulting date was not skipped.** It was the softer half of the lesson, the
+  half with no test forcing it, and it is the half that would let a future regression go
+  unnoticed. It shipped anyway.
+- **`forgetFolder` landed on both ports symmetrically**, and clearing one port's id provably
+  does not disturb the other's. A one-port fix would have looked complete in review.
+- **R-5's 404s are byte-identical to the foreign-tenant 404s.** Returning "404" is easy;
+  returning the *same* 404 is the part that actually denies the oracle, and it was done.
+- **The ledger is still true.** 392 + 7 skipped + 1 e2e, measured independently, matches every
+  document that claims it. Six passes in, that has never once drifted.
+
+### Lesson filed
+
+One, appended to `docs/lessons.md` (2026-09-10): when a fix freezes a derived value for one
+mode of a control, check every *other* mode of the same control in the same pass — and back
+the invariant the fix now depends on with a database constraint, not a convention.
+
+---
+
+### Plain language, for the founder
+
+The expiry bug is genuinely fixed, and I checked it the way a user would hit it: I loaded the
+real settings page, took the exact values the page had filled in, waited twenty-five virtual
+days, changed only the file's name, and saved. The expiry date did not move by a millisecond —
+and the page now prints the actual date next to "30 days", so nothing can change silently
+again. I also fired 200 rapid "send again" clicks and got one email, three log rows and an
+exact count of the refusals; threw twelve kinds of malformed link at all six pages and got
+zero crashes and a 404 indistinguishable from someone else's file; and killed the storage
+folder on both providers to confirm the system notices and rebuilds it. Nothing here holds up
+the live spikes — go run them.
