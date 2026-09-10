@@ -1,7 +1,7 @@
 # Founder Summary — Swenlly System 2 build (2026-09-08)
 
 **Verdict of the final gate (critic, third re-check): SHIP-READY-FOR-LIVE-SPIKES.**
-Branch: `claude/swenlly-system-2-file-sharing-32nrdu` · 41 commits · 392 tests + 1 browser e2e green on real
+Branch: `claude/swenlly-system-2-file-sharing-32nrdu` · 41 commits (incl. this one) · 392 tests + 1 browser e2e green on real
 Postgres · 7 tests skip until live credentials exist · **0 live calls to Zoho, Google or Mailgun
 have been made by anyone on this project** (`docs/verification-ledger.md`).
 
