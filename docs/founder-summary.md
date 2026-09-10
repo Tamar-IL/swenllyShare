@@ -1,7 +1,7 @@
 # Founder Summary — Swenlly System 2 build (2026-09-08)
 
 **Verdict of the final gate (critic, third re-check): SHIP-READY-FOR-LIVE-SPIKES.**
-Branch: `claude/swenlly-system-2-file-sharing-32nrdu` · 41 commits (incl. this one) · 392 tests + 1 browser e2e green on real
+Branch: `claude/swenlly-system-2-file-sharing-32nrdu` · 43 commits · 395 tests + 1 browser e2e green on real
 Postgres · 7 tests skip until live credentials exist · **0 live calls to Zoho, Google or Mailgun
 have been made by anyone on this project** (`docs/verification-ledger.md`).
 
@@ -22,7 +22,7 @@ real embed token. Hebrew-first RTL UI, browser-verified. CI runs the whole suite
 Every Minor/N-* item from the reviews is closed: quarantine suppression rows, redacting logger
 everywhere, expiry-mode fidelity + backfill, per-tenant folders persisted across restarts, a
 rate-limited, in-flight-guarded resend action, a browser e2e smoke test in CI, per-run isolated
-test databases, and a CI ledger check that now fails the build. Suite: 392 + 1 e2e.
+test databases, and a CI ledger check that now fails the build. Suite: 395 + 1 e2e.
 
 ## What is proven vs. not
 Proven: every PRD acceptance criterion has a test that exercises it against semantic fakes

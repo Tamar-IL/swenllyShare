@@ -72,6 +72,14 @@ export function registerApiFileRoutes(app: FastifyInstance, container: Container
       // Bug 1 (QA report): `sinceId` is the other half of the `(created_at, id)` keyset
       // cursor — see deliveries.ts listForFile()'s doc comment.
       const sinceId = request.query.sinceId || undefined;
+      // Fix pass 11 (critic N-15): establish ownership explicitly — the listing is
+      // tenant-scoped either way, but a foreign or unknown file id must be a 404, not an
+      // empty 200 that reads as "this file exists and has no deliveries".
+      const owned = await container.services.files.getById(request.tenantId, request.params.id);
+      if (!owned) {
+        _reply.code(404);
+        return { error: ErrorCode.NOT_FOUND };
+      }
       const { items, total } = await container.services.audit.listForFile(
         request.tenantId,
         request.params.id,

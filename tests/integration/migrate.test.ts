@@ -24,6 +24,7 @@ describe.skipIf(!hasTestDatabase())('migrate (idempotency)', () => {
       '0007_expiry_mode_backfill_and_tenant_folders.sql',
       '0008_resend_in_flight_guard.sql',
       '0009_resend_rate_limited_aggregate.sql',
+      '0010_expiry_mode_days_pairing.sql',
     ]);
   });
 

@@ -15,7 +15,7 @@ precedence: [`docs/00-README.md`](docs/00-README.md).
 
 ## Status: built, unverified against live providers
 
-**392 tests pass** (+1 browser e2e) (`pnpm test`, real Postgres + semantic fakes for every provider). **Zero live
+**395 tests pass** (+1 browser e2e) (`pnpm test`, real Postgres + semantic fakes for every provider). **Zero live
 calls have been made to Google Drive, Zoho WorkDrive, or Mailgun by anyone on this project** —
 every real adapter method is `@unverified-live` in
 [`docs/verification-ledger.md`](docs/verification-ledger.md) (generated from those markers, CI

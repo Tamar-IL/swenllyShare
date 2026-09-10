@@ -178,7 +178,18 @@ export class SettingsService {
           current.expiry_mode === 'days' &&
           current.expiry_days === days &&
           current.expires_at !== null;
-        if (!unchangedDaysMode) {
+        // Fix pass 11 (critic N-14): the same rule for `custom` mode — the date input can
+        // only carry a calendar day, so re-submitting the pre-filled date must not truncate
+        // a stored timestamp to UTC midnight (which silently shortened backfilled expiries).
+        const unchangedCustomMode =
+          input.expiryMode === 'custom' &&
+          current.expiry_mode === 'custom' &&
+          current.expires_at !== null &&
+          resolvedExpiry !== undefined &&
+          resolvedExpiry !== null &&
+          resolvedExpiry.toISOString().slice(0, 10) ===
+            current.expires_at.toISOString().slice(0, 10);
+        if (!unchangedDaysMode && !unchangedCustomMode) {
           patch.expiresAt = resolvedExpiry;
         }
         // Fix pass 7 (critic-report.md Minor): persist the FORM's own choice alongside the

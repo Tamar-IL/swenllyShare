@@ -49,3 +49,7 @@ Three lines per chunk, newest last. Live external calls made so far: **0**.
 ## 2026-09-10 — Critic fifth pass (SHIP-READY) → fix pass 10 (green)
 - Fifth pass confirmed R-1/R-2 closed but found N-11: a rename re-issued a days-mode expiry from now. Fixed (unchanged control ⇒ timestamp kept; date now shown next to the control), plus N-12 (aggregated refused-resend rows, 0009), R-5 (malformed ids ⇒ 404), N-13 (dead folder id self-heals; spike-1 record item), ADR 21.
 - Suite: 392 tests + 1 e2e green, 7 live-gated skips. Live external calls: **0**.
+
+## 2026-09-10 — Critic sixth pass (SHIP-READY) → fix pass 11 (green)
+- N-11..N-13 and R-5 confirmed closed by fresh probes; three new minors (N-14 custom-date truncation, N-15 deliveries-API ownership, N-16 days/expiry_days CHECK) fixed the same day (migration 0010).
+- Suite: 395 tests + 1 e2e green, 7 live-gated skips. Live external calls: **0**. Nothing is carried open except the founder forks and the live spikes.

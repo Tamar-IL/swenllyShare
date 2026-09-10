@@ -2365,3 +2365,20 @@ exact count of the refusals; threw twelve kinds of malformed link at all six pag
 zero crashes and a 404 indistinguishable from someone else's file; and killed the storage
 folder on both providers to confirm the system notices and rebuilds it. Nothing here holds up
 the live spikes — go run them.
+
+
+---
+
+## Fix pass 11 status (orchestrator, 2026-09-10) — response to the sixth pass
+
+- **N-14 — fixed.** `updateSettings` applies the same unchanged-control rule to `custom` mode:
+  when the submitted calendar date equals the stored timestamp's UTC date, the stored value is
+  kept; a different date is applied. Test: `tests/review/fix-pass-11.test.ts`.
+- **N-15 — fixed.** `GET /api/files/:id/deliveries` establishes ownership via `files.getById`
+  before listing; foreign or unknown ids are a 404, identical to `/status`. Test: own / foreign /
+  nil UUID.
+- **N-16 — fixed.** Migration 0010 normalizes any stray rows and adds
+  `CHECK ((expiry_mode = 'days') = (expiry_days IS NOT NULL AND expiry_days > 0))`. Test: both
+  directions of the pairing are refused with `23514`.
+
+Suite after fix pass 11: 395 tests + 1 e2e, 7 live-gated skips, zero `it.fails`.
