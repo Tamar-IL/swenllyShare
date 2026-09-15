@@ -33,7 +33,7 @@ describe('loadConfig', () => {
     expect(config.RATE_TENANT_PER_HOUR).toBe(300);
     expect(config.RATE_MAGICLINK_PER_HOUR).toBe(5);
     expect(config.RAW_PAYLOAD_RETENTION_DAYS).toBe(7);
-    expect(config.GOOGLE_CREDENTIAL_MODE).toBe('service_account');
+    expect(config.GOOGLE_CREDENTIAL_MODE).toBe('oauth_refresh');
     expect(config.WORKER_ENABLED).toBe(true);
     expect(config.WORKER_CONCURRENCY).toBe(4);
     expect(config.JOB_MAX_ATTEMPTS).toBe(8);

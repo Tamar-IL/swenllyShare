@@ -123,26 +123,32 @@ is hit (this codebase assumes `sharingRateLimitExceeded` / `rateLimitExceeded` /
 `userRateLimitExceeded` — a kickoff-brief-specified set, never independently observed); and
 the resumable-upload chunk framing against a real Shared Drive.
 
-**Env vars needed** (service-account mode — the advisor's recommended path,
-`advisor-consult.md §4`):
+**Env vars needed** (personal-Gmail mode — the founder's choice, 2026-09-15; no Workspace):
+
+```
+LIVE_GOOGLE=1
+GOOGLE_CREDENTIAL_MODE=oauth_refresh
+GOOGLE_OAUTH_CLIENT_ID=...        # an OAuth client in a Google Cloud project you own
+GOOGLE_OAUTH_CLIENT_SECRET=...
+GOOGLE_OAUTH_REFRESH_TOKEN=...    # minted once for the central Gmail account, scope drive.file
+GOOGLE_ROOT_FOLDER_ID=...         # optional — a folder in that account's My Drive
+```
+
+**The one question this spike must answer on a personal account:** share a file to a
+non-Google test address and try to open it. If Google offers the email-code ("visitor") flow
+and it opens, AC-R4 holds. If it demands a Google sign-in, record that: email-only recipients
+without a Google account then get large files only via the raw Zoho link, and the PRD's
+"small slice, not an MVP blocker" gap is real for this account type.
+
+Optional, only if a Workspace is ever adopted (service-account mode):
 
 ```
 LIVE_GOOGLE=1
 GOOGLE_CREDENTIAL_MODE=service_account
 GOOGLE_SA_JSON_PATH=/path/to/service-account.json
 GOOGLE_IMPERSONATE_SUBJECT=someone@yourworkspace.com   # domain-wide delegation target
-GOOGLE_SHARED_DRIVE_ID=...                             # a real Shared Drive id
-GOOGLE_ROOT_FOLDER_ID=...                               # optional — a folder inside it
-```
-
-Or, for the founder-fork path (no Workspace — `advisor-consult.md §4`, PRD §10.4):
-
-```
-LIVE_GOOGLE=1
-GOOGLE_CREDENTIAL_MODE=oauth_refresh
-GOOGLE_OAUTH_CLIENT_ID=...
-GOOGLE_OAUTH_CLIENT_SECRET=...
-GOOGLE_OAUTH_REFRESH_TOKEN=...
+GOOGLE_SHARED_DRIVE_ID=...
+GOOGLE_ROOT_FOLDER_ID=...
 ```
 
 **Command:**

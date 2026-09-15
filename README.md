@@ -94,8 +94,8 @@ chunked-upload path) · `STAGING_DIR`=./staging, `STAGING_RETENTION_HOURS`=24 ·
 `RAW_PAYLOAD_RETENTION_DAYS`=7 · `QUARANTINE_PER_TOKEN_PER_HOUR`=5 (caps unauthenticated writes) ·
 `WEBHOOK_BODY_LIMIT_BYTES`=2MB (enforced pre-parse) · `WORKER_CONCURRENCY`=4, `JOB_MAX_ATTEMPTS`=8.
 
-**Providers** — `GOOGLE_CREDENTIAL_MODE`=service_account|oauth_refresh + SA/OAuth vars (Workspace SA
-or no-Workspace fallback) · `ZOHO_CLIENT_ID`/`_SECRET`/`_REFRESH_TOKEN`, `ZOHO_API_BASE`/
+**Providers** — `GOOGLE_CREDENTIAL_MODE`=oauth_refresh (personal Gmail, default) | service_account (Workspace,
+optional) + the matching OAuth/SA vars · `ZOHO_CLIENT_ID`/`_SECRET`/`_REFRESH_TOKEN`, `ZOHO_API_BASE`/
 `_ACCOUNTS_BASE`, `ZOHO_TEAM_FOLDER_ID`, `ZOHO_LINK_ROLE_ID`=6 (WorkDrive OAuth + DC host + folder
 link role) · `MAILGUN_API_BASE`/`_API_KEY`/`_SIGNING_KEY`/`_SENDING_DOMAIN`, `OUTBOUND_FROM` ·
 `MAILGUN_AUTHSERV_ID` (fix pass 5, F-B: **required** whenever `ADAPTERS=real` or
@@ -152,8 +152,11 @@ confirmation of the Zoho link/upload API; Google account type + real share ceili
 window and the no-Google-account gap. Plus two forks from
 [architecture.md §12](docs/design/architecture.md#12-top-tradeoffs-risks-and-what-i-did-not-verify):
 
-- **Google account type → AC-R4.** Email-OTP visitor sharing is Workspace-only; a consumer Gmail
-  central account degrades AC-R4 to "recipient needs a Google account" — a product decision.
+- **Google account type → AC-R4 (decided 2026-09-15: personal Gmail, no Workspace).** The
+  central Drive is the founder's own Gmail (`GOOGLE_CREDENTIAL_MODE=oauth_refresh`, the default).
+  Email-code "visitor" sharing is documented as a Workspace admin feature, so spike 2 must test
+  whether a recipient with no Google account can open a share; if not, large files for such
+  recipients go via the raw Zoho link only — the PRD's accepted "small slice" gap.
 - **Upload ceiling.** `MAX_UPLOAD_BYTES` defaults to 250 MB (fix pass 5, F-G: the corroborated
   Zoho simple-upload ceiling — the old 1 GB default routed every upload above 250 MB into
   `uploadLargeFile`'s unverified, modeled-guess chunked-upload path); raise it once spike 1

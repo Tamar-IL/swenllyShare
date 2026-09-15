@@ -228,3 +228,14 @@ The new job re-runs expiry/status/allowlist before sending.
 **Consequence:** resend can never amplify past what the requester could have triggered by email,
 and concurrent clicks yield exactly one delivery. Refused resends are audited (aggregated per
 file/requester/hour, N-12).
+
+### 22. Central Google Drive is a personal Gmail, not Workspace (founder, 2026-09-15)
+**Context:** the architecture assumed Workspace + a service account for the email-code "visitor"
+sharing feature and higher share ceilings; the founder does not want a Workspace.
+**Decision:** `GOOGLE_CREDENTIAL_MODE=oauth_refresh` is the default: an OAuth client + refresh
+token for the founder's own Gmail, scope `drive.file`. Service-account mode stays in the code
+for a future Workspace.
+**Consequence:** nothing in the pipeline changes. Spike 2 must confirm whether a no-Google-account
+recipient can open a private share on a personal account; if not, AC-R4 degrades to "needs a
+Google account" for large files and the PRD's accepted small-slice gap applies. Share-quota
+duplication may trigger earlier on a personal account; the engine already handles that.

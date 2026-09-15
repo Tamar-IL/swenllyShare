@@ -116,7 +116,10 @@ const baseConfigSchema = z.object({
   QUARANTINE_PER_TOKEN_PER_HOUR: intFromEnv(5, { min: 1 }),
 
   // --- Google ---
-  GOOGLE_CREDENTIAL_MODE: z.enum(['service_account', 'oauth_refresh']).default('service_account'),
+  // Founder decision (2026-09-15): the central Drive is a personal Gmail, not Workspace —
+  // `oauth_refresh` is the default; `service_account` (domain-wide delegation) stays
+  // available if a Workspace is ever adopted.
+  GOOGLE_CREDENTIAL_MODE: z.enum(['service_account', 'oauth_refresh']).default('oauth_refresh'),
   GOOGLE_SA_JSON_PATH: z.string().optional(),
   GOOGLE_IMPERSONATE_SUBJECT: z.string().optional(),
   GOOGLE_SHARED_DRIVE_ID: z.string().optional(),
