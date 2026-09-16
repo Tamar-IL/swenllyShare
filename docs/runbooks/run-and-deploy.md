@@ -13,6 +13,18 @@ starving HTTP under load, or you've moved `STAGING_DIR` to a shared object-store
 want to scale the two independently. Until then, splitting buys nothing and costs a queue
 service the architecture deliberately avoided (Postgres already serves as the job queue).
 
+## Fresh server in one command
+
+```bash
+git clone -b claude/swenlly-system-2-file-sharing-32nrdu <repo-url> swenlly-share
+cd swenlly-share
+scripts/setup-server.sh      # checks Node 22 / pnpm / Postgres 16, installs, creates .env
+                             # with a generated SESSION_SECRET, migrates, builds, prints next steps
+```
+
+The script is idempotent and never touches an existing `.env`. Put real provider keys in
+`.env` afterwards (it is gitignored) and follow `docs/runbooks/live-spikes.md`.
+
 ## Local run
 
 ```
